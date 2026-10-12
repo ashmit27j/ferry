@@ -1,0 +1,100 @@
+# A fuller Ferry config: every M1 routing, balancing and health feature.
+#
+#   ferry check-config examples/gateway.yaml
+#
+# Field names are snake_case versions of the Gateway API's; see
+# `ferry check-config --schema` for the full format.
+
+listeners:
+  - name: http
+    address: 0.0.0.0:8080
+    routes:
+      # Old hostname: permanent redirect to the new one over HTTPS.
+      - name: legacy
+        hostnames: [old.example.com]
+        rules:
+          - filters:
+              - type: RequestRedirect
+                scheme: https
+                hostname: www.example.com
+                status_code: 301
+
+      - name: api
+        hostnames: [api.example.com, "*.api.example.com"]
+        rules:
+          # 10% canary for /v2, split exactly and interleaved.
+          - matches:
+              - path: { type: PathPrefix, value: /v2 }
+            backends:
+              - { cluster: api-stable, weight: 90 }
+              - { cluster: api-canary, weight: 10 }
+
+          # Testers opt into the canary with a header.
+          - matches:
+              - path: { type: PathPrefix, value: /v2 }
+                headers: [{ name: x-canary, value: "always" }]
+            backends: [{ cluster: api-canary }]
+
+          # Numeric user IDs only; sticky per user.
+          - matches:
+              - path: { type: RegularExpression, value: '/users/\d+(/.*)?' }
+                method: GET
+            backends: [{ cluster: sessions }]
+
+          # Old prefix, rewritten for the backend, with header edits.
+          - matches:
+              - path: { type: PathPrefix, value: /v1 }
+            filters:
+              - type: URLRewrite
+                path: { type: ReplacePrefixMatch, replace_prefix_match: /v2 }
+              - type: RequestHeaderModifier
+                set: [{ name: x-api-version, value: "1" }]
+                remove: [x-debug]
+              - type: ResponseHeaderModifier
+                add: [{ name: deprecation, value: "true" }]
+            backends: [{ cluster: api-stable }]
+
+      # gRPC needs an HTTP/2 upstream.
+      - name: grpc
+        hostnames: [grpc.example.com]
+        rules:
+          - backends: [{ cluster: echo-grpc }]
+
+clusters:
+  - name: api-stable
+    lb_policy: p2c_ewma
+    health_check:
+      interval: 5s
+      timeout: 1s
+      http: { path: /healthz }
+    endpoints:
+      - address: 10.0.1.10:8080
+      - address: 10.0.1.11:8080
+      - address: 10.0.1.12:8080
+
+  - name: api-canary
+    lb_policy: least_request
+    endpoints:
+      - address: 10.0.2.10:8080
+
+  - name: sessions
+    lb_policy: maglev
+    hash_policy: { cookie: { name: ferry-session, ttl: 12h } }
+    panic_threshold: 0
+    health_check:
+      interval: 2s
+      unhealthy_threshold: 2
+      http: { path: /ready, expected_statuses: [200, 204] }
+    endpoints:
+      - { address: 10.0.3.10:8080, weight: 2 }
+      - { address: 10.0.3.11:8080, weight: 1 }
+
+  - name: echo-grpc
+    protocol: http2
+    lb_policy: weighted_round_robin
+    connect_timeout: 500ms
+    health_check:
+      grpc: { service: ferry.testkit.echo.v1.Echo }
+    endpoints:
+      - { address: 10.0.4.10:50051, weight: 3 }
+      - { address: 10.0.4.11:50051, weight: 1 }
