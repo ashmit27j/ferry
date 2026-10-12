@@ -25,6 +25,20 @@ pub mod proto {
     tonic::include_proto!("ferry.testkit.echo.v1");
 }
 
+/// Generated types for `grpc.health.v1`.
+#[allow(
+    missing_docs,
+    missing_debug_implementations,
+    clippy::all,
+    clippy::pedantic
+)]
+pub mod health_proto {
+    tonic::include_proto!("grpc.health.v1");
+}
+
+use health_proto::health_check_response::ServingStatus;
+use health_proto::health_server::{Health, HealthServer};
+use health_proto::{HealthCheckRequest, HealthCheckResponse};
 use proto::echo_server::{Echo, EchoServer};
 use proto::{EchoRequest, EchoResponse};
 
@@ -50,7 +64,12 @@ pub async fn spawn(addr: SocketAddr, behavior: Behavior) -> std::io::Result<Mock
 }
 
 async fn accept_loop(listener: TcpListener, svc: EchoService, token: CancellationToken) {
-    let routes = tonic::service::Routes::new(EchoServer::new(svc)).prepare();
+    let health = HealthService {
+        stats: Arc::clone(&svc.stats),
+    };
+    let routes = tonic::service::Routes::new(EchoServer::new(svc))
+        .add_service(HealthServer::new(health))
+        .prepare();
     let mut builder = auto::Builder::new(TokioExecutor::new());
     builder = builder.http2_only();
     loop {
@@ -159,5 +178,28 @@ impl Echo for EchoService {
             msg.map(|m| this.reply(m.message, seq))
         });
         Ok(Response::new(Box::pin(out)))
+    }
+}
+
+/// `grpc.health.v1.Health`, reporting the mock's health flag for every service.
+#[derive(Debug, Clone)]
+struct HealthService {
+    stats: Arc<Stats>,
+}
+
+#[tonic::async_trait]
+impl Health for HealthService {
+    async fn check(
+        &self,
+        _req: Request<HealthCheckRequest>,
+    ) -> Result<Response<HealthCheckResponse>, Status> {
+        let status = if self.stats.healthy() {
+            ServingStatus::Serving
+        } else {
+            ServingStatus::NotServing
+        };
+        Ok(Response::new(HealthCheckResponse {
+            status: status.into(),
+        }))
     }
 }

@@ -14,10 +14,15 @@
 //! All three honour [`Behavior`]: a fixed latency and a random error rate.
 //! The HTTP mock also accepts per-request overrides through the
 //! `x-mock-latency-ms` and `x-mock-status` request headers.
+//!
+//! [`MockServer::set_healthy`] flips what the mocks report to health checks:
+//! `GET /healthz` on the HTTP mock (200 or 503) and `grpc.health.v1.Health/Check`
+//! on the gRPC mock (`SERVING` or `NOT_SERVING`). Health requests are not
+//! counted in [`Stats`].
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
@@ -73,14 +78,31 @@ impl Behavior {
     }
 }
 
-/// Counters a mock updates as it serves.
-#[derive(Debug, Default)]
+/// Counters a mock updates as it serves, plus its reported health.
+#[derive(Debug)]
 pub struct Stats {
     requests: AtomicU64,
     errors: AtomicU64,
+    healthy: AtomicBool,
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self {
+            requests: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            healthy: AtomicBool::new(true),
+        }
+    }
 }
 
 impl Stats {
+    /// What the mock currently reports to health checks.
+    #[must_use]
+    pub fn healthy(&self) -> bool {
+        self.healthy.load(Ordering::Relaxed)
+    }
+
     /// Requests (or gRPC calls, or WebSocket messages) handled.
     #[must_use]
     pub fn requests(&self) -> u64 {
@@ -135,6 +157,11 @@ impl MockServer {
     #[must_use]
     pub fn stats(&self) -> &Stats {
         &self.stats
+    }
+
+    /// Sets what health checks see. Normal requests are unaffected.
+    pub fn set_healthy(&self, healthy: bool) {
+        self.stats.healthy.store(healthy, Ordering::Relaxed);
     }
 
     /// Stops accepting and closes every open connection immediately, then

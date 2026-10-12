@@ -24,6 +24,8 @@ pub const LATENCY_HEADER: &str = "x-mock-latency-ms";
 pub const STATUS_HEADER: &str = "x-mock-status";
 /// Response header naming the backend that answered.
 pub const BACKEND_HEADER: &str = "x-mock-backend";
+/// Health endpoint: 200 when healthy, 503 otherwise. Not counted in stats.
+pub const HEALTH_PATH: &str = "/healthz";
 
 /// Starts an HTTP/1.1 + h2c echo server on `addr`.
 ///
@@ -83,6 +85,13 @@ async fn respond(
     behavior: Arc<Behavior>,
     stats: Arc<Stats>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
+    if req.uri().path() == HEALTH_PATH {
+        let mut resp = Response::new(Full::new(Bytes::from_static(b"ok")));
+        if !stats.healthy() {
+            *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+        }
+        return Ok(resp);
+    }
     let latency = header_u64(&req, LATENCY_HEADER).map_or(behavior.latency, Duration::from_millis);
     let forced = header_u64(&req, STATUS_HEADER)
         .and_then(|s| u16::try_from(s).ok())
