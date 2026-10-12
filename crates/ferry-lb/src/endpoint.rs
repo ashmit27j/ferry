@@ -11,6 +11,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::outlier::OutlierState;
+
 /// Latency assumed for an endpoint before its first response.
 pub const DEFAULT_RTT: Duration = Duration::from_millis(1);
 /// Time constant of the latency EWMA, as in Linkerd.
@@ -26,6 +28,7 @@ pub struct EndpointState {
     healthy: AtomicBool,
     active: AtomicU64,
     ewma: PeakEwma,
+    pub(crate) outlier: OutlierState,
 }
 
 impl EndpointState {
@@ -37,6 +40,7 @@ impl EndpointState {
             healthy: AtomicBool::new(true),
             active: AtomicU64::new(0),
             ewma: PeakEwma::new(DEFAULT_RTT),
+            outlier: OutlierState::default(),
         }
     }
 
@@ -51,6 +55,12 @@ impl EndpointState {
     #[must_use]
     pub fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Relaxed)
+    }
+
+    /// Whether passive outlier detection has ejected this endpoint.
+    #[must_use]
+    pub fn is_ejected(&self) -> bool {
+        self.outlier.is_ejected()
     }
 
     /// Records a health verdict; returns true if it changed.
@@ -182,7 +192,7 @@ fn duration_ns(d: Duration) -> f64 {
 }
 
 /// Nanoseconds since a process-wide base instant, for storing in atomics.
-fn nanos_since_base(now: Instant) -> u64 {
+pub(crate) fn nanos_since_base(now: Instant) -> u64 {
     static BASE: OnceLock<Instant> = OnceLock::new();
     let base = *BASE.get_or_init(Instant::now);
     u64::try_from(now.saturating_duration_since(base).as_nanos()).unwrap_or(u64::MAX)

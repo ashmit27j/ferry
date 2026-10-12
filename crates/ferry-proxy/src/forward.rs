@@ -29,8 +29,8 @@ use crate::body::{
 use crate::grpc;
 use crate::router::{RequestInfo, normalize_host};
 use crate::state::{ClusterRuntime, Runtime, hash_key, set_cookie};
-use ferry_lb::Permit;
 use ferry_lb::pool::PoolError;
+use ferry_lb::{Outcome, Permit};
 
 /// Most endpoints one request is sent to.
 pub const MAX_ATTEMPTS: usize = 3;
@@ -557,6 +557,7 @@ impl Attempts<'_> {
                 Err(e) => {
                     // Nothing was sent: always safe to try elsewhere.
                     guard.observe_failure();
+                    cluster.balancer.record(index, Outcome::GatewayFailure);
                     debug!(endpoint = %host.state.address(), attempt, error = %e, "connect failed; trying another endpoint");
                     last = Failure::Pool(e);
                     continue;
@@ -572,6 +573,9 @@ impl Attempts<'_> {
             match sent {
                 Some(Ok(resp)) => {
                     guard.observe_response();
+                    cluster
+                        .balancer
+                        .record(index, Outcome::from_status(resp.status().as_u16()));
                     if attempt + 1 < max
                         && self.policy_allows(
                             resp.status().as_u16(),
@@ -595,6 +599,7 @@ impl Attempts<'_> {
                 }
                 Some(Err(mut e)) => {
                     guard.observe_failure();
+                    cluster.balancer.record(index, Outcome::GatewayFailure);
                     let unsent = e.take_message();
                     let error = e.into_error();
                     debug!(endpoint = %host.state.address(), attempt, error = %error, unsent = unsent.is_some(), "upstream send failed");
@@ -616,6 +621,7 @@ impl Attempts<'_> {
                 }
                 None => {
                     guard.observe_failure();
+                    cluster.balancer.record(index, Outcome::GatewayFailure);
                     debug!(endpoint = %host.state.address(), attempt, "upstream attempt timed out");
                     if attempt + 1 < max
                         && self.policy_allows(504, policy_retries, &req, &mut retry_slot)

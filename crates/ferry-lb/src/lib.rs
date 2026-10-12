@@ -19,6 +19,7 @@ mod cluster;
 mod endpoint;
 pub mod health;
 pub mod maglev;
+mod outlier;
 pub mod pool;
 mod round_robin;
 mod weighted;
@@ -27,6 +28,7 @@ pub use breaker::{CircuitBreakers, Limit, Permit};
 pub use budget::RetryBudget;
 pub use cluster::{ClusterBalancer, Host, HostSet, Policy};
 pub use endpoint::{DEFAULT_RTT, EWMA_DECAY, EndpointState, FAILURE_PENALTY, RequestGuard};
+pub use outlier::{Outcome, OutlierConfig};
 pub use round_robin::RoundRobin;
 pub use weighted::WeightedSelector;
 

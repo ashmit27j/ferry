@@ -28,7 +28,9 @@ use ferry_config::{
 };
 use ferry_lb::health::{self, HealthSpec, Probe};
 use ferry_lb::pool::{Pool, PoolKey, PoolSet, Protocol};
-use ferry_lb::{CircuitBreakers, ClusterBalancer, EndpointState, Host, Policy, RetryBudget};
+use ferry_lb::{
+    CircuitBreakers, ClusterBalancer, EndpointState, Host, OutlierConfig, Policy, RetryBudget,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -217,12 +219,24 @@ impl Control {
             ),
             budget: RetryBudget::new(b.budget_percent(), b.min_retries_per_second(), b.ttl()),
             config: c.clone(),
-            balancer: ClusterBalancer::new(
-                hosts,
-                policy(c.lb_policy()),
-                c.panic_threshold(),
-                fastrand::usize(..),
-            ),
+            balancer: {
+                let b = ClusterBalancer::new(
+                    hosts,
+                    policy(c.lb_policy()),
+                    c.panic_threshold(),
+                    fastrand::usize(..),
+                );
+                match c.outlier_detection() {
+                    Some(o) => b.with_outlier_detection(OutlierConfig {
+                        consecutive_5xx: o.consecutive_5xx(),
+                        consecutive_gateway_failure: o.consecutive_gateway_failure(),
+                        base_ejection_time: o.base_ejection_time(),
+                        max_ejection_time: o.max_ejection_time(),
+                        max_ejection_percent: o.max_ejection_percent(),
+                    }),
+                    None => b,
+                }
+            },
             pools,
         }
     }

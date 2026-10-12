@@ -26,6 +26,9 @@ use crate::state::{BoundListener, Control, HealthSink, ListenerRuntime, Runtime}
 /// How long a draining proxy waits for in-flight requests before closing connections.
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How often expired outlier ejections are ended.
+const EJECTION_SWEEP_INTERVAL: Duration = Duration::from_millis(500);
+
 /// How often idle upstream connections are swept.
 const POOL_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -177,7 +180,7 @@ impl Proxy {
                 drain_timeout,
             ));
         }
-        let sweeper = tokio::spawn(sweep_pools(Arc::downgrade(&self.shared), token.clone()));
+        let sweeper = tokio::spawn(maintenance(Arc::downgrade(&self.shared), token.clone()));
         shutdown.await;
         info!(?drain_timeout, "shutdown requested; draining");
         token.cancel();
@@ -229,16 +232,26 @@ impl ReloadHandle {
     }
 }
 
-async fn sweep_pools(shared: Weak<Shared>, token: CancellationToken) {
+/// Background upkeep: ends expired outlier ejections every
+/// [`EJECTION_SWEEP_INTERVAL`] and closes idle upstream connections every
+/// [`POOL_SWEEP_INTERVAL`].
+async fn maintenance(shared: Weak<Shared>, token: CancellationToken) {
+    let mut last_pool_sweep = tokio::time::Instant::now();
     loop {
         tokio::select! {
             () = token.cancelled() => return,
-            () = tokio::time::sleep(POOL_SWEEP_INTERVAL) => {}
+            () = tokio::time::sleep(EJECTION_SWEEP_INTERVAL) => {}
         }
         let Some(shared) = shared.upgrade() else {
             return;
         };
-        shared.pools.evict_idle();
+        for c in &shared.runtime.load().clusters {
+            c.balancer.sweep_ejections();
+        }
+        if last_pool_sweep.elapsed() >= POOL_SWEEP_INTERVAL {
+            shared.pools.evict_idle();
+            last_pool_sweep = tokio::time::Instant::now();
+        }
     }
 }
 

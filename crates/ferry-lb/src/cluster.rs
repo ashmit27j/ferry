@@ -19,8 +19,9 @@ use std::time::Instant;
 use arc_swap::ArcSwap;
 
 use crate::Balancer;
-use crate::endpoint::EndpointState;
+use crate::endpoint::{EndpointState, nanos_since_base};
 use crate::maglev::Maglev;
+use crate::outlier::{Outcome, OutlierConfig};
 use crate::weighted::WeightedSelector;
 
 /// Endpoint selection policies (ADR 0010).
@@ -57,6 +58,8 @@ pub struct ClusterBalancer {
     set: ArcSwap<HostSet>,
     /// Round-robin cursor, kept across host-set rebuilds.
     cursor: AtomicUsize,
+    outlier: Option<OutlierConfig>,
+    rebuild: std::sync::Mutex<()>,
 }
 
 /// The endpoints eligible for traffic at one moment, with policy state.
@@ -108,7 +111,61 @@ impl ClusterBalancer {
             panic_threshold,
             set: ArcSwap::from_pointee(set),
             cursor: AtomicUsize::new(start),
+            outlier: None,
+            rebuild: std::sync::Mutex::new(()),
         }
+    }
+
+    /// Enables passive outlier detection.
+    #[must_use]
+    pub fn with_outlier_detection(mut self, cfg: OutlierConfig) -> Self {
+        self.outlier = Some(cfg);
+        self
+    }
+
+    /// Records how an attempt on host `index` ended. May eject the host,
+    /// which rebuilds the host set (rare, so done inline).
+    pub fn record(&self, index: usize, outcome: Outcome) {
+        let (Some(cfg), Some(host)) = (self.outlier.as_ref(), self.hosts.get(index)) else {
+            return;
+        };
+        if !host.state.outlier.record(outcome, cfg) {
+            return;
+        }
+        let ejected = self.hosts.iter().filter(|h| h.state.is_ejected()).count();
+        let allowed = (self.hosts.len() * usize::from(cfg.max_ejection_percent) / 100).max(1);
+        if ejected >= allowed {
+            return;
+        }
+        if host
+            .state
+            .outlier
+            .eject(nanos_since_base(Instant::now()), cfg)
+        {
+            tracing::warn!(endpoint = %host.state.address(), ?outcome, "outlier ejected");
+            self.refresh();
+        }
+    }
+
+    /// Returns ejected hosts whose time is up to rotation and decays ejection
+    /// multipliers; rebuilds the host set if anything came back. Returns true
+    /// if it did.
+    pub fn sweep_ejections(&self) -> bool {
+        let Some(cfg) = self.outlier.as_ref() else {
+            return false;
+        };
+        let now = nanos_since_base(Instant::now());
+        let mut changed = false;
+        for h in &self.hosts {
+            if h.state.outlier.sweep(now, cfg) {
+                tracing::info!(endpoint = %h.state.address(), "outlier ejection ended");
+                changed = true;
+            }
+        }
+        if changed {
+            self.refresh();
+        }
+        changed
     }
 
     /// The cluster's hosts, in config order. Picks index into this slice.
@@ -132,6 +189,12 @@ impl ClusterBalancer {
     /// Recomputes the host set from current health. Call after any health
     /// change; it allocates and, for Maglev, rebuilds the table.
     pub fn refresh(&self) {
+        // Serialise rebuilds so the last one stored saw the latest health and
+        // ejection state. Rebuilds are rare and never on the per-request path.
+        let _rebuilding = self
+            .rebuild
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.set.store(Arc::new(build_set(
             &self.hosts,
             self.policy,
@@ -217,7 +280,7 @@ fn build_set(hosts: &[Host], policy: Policy, panic_threshold: u8) -> HostSet {
     let healthy: Vec<usize> = hosts
         .iter()
         .enumerate()
-        .filter(|(_, h)| h.state.is_healthy())
+        .filter(|(_, h)| h.state.is_healthy() && !h.state.is_ejected())
         .map(|(i, _)| i)
         .collect();
     let panic = healthy.len() * 100 < usize::from(panic_threshold) * hosts.len();
@@ -363,6 +426,65 @@ mod tests {
             }
         }
         assert!(moved_needlessly < 100, "{moved_needlessly}");
+    }
+
+    fn outlier(percent: u8, base: std::time::Duration) -> OutlierConfig {
+        OutlierConfig {
+            consecutive_5xx: 2,
+            consecutive_gateway_failure: 2,
+            base_ejection_time: base,
+            max_ejection_time: base * 10,
+            max_ejection_percent: percent,
+        }
+    }
+
+    #[test]
+    fn consecutive_failures_eject_from_the_host_set() {
+        let b = ClusterBalancer::new(hosts(3), Policy::RoundRobin, 0, 0)
+            .with_outlier_detection(outlier(50, std::time::Duration::from_secs(60)));
+        b.record(1, Outcome::GatewayFailure);
+        assert_eq!(b.host_set().len(), 3);
+        b.record(1, Outcome::GatewayFailure);
+        assert!(b.hosts()[1].state.is_ejected());
+        assert_eq!(b.host_set().len(), 2);
+        assert_eq!(counts(&b, 10)[1], 0);
+    }
+
+    #[test]
+    fn ejection_percent_caps_but_always_allows_one() {
+        let b = ClusterBalancer::new(hosts(4), Policy::RoundRobin, 0, 0)
+            .with_outlier_detection(outlier(10, std::time::Duration::from_secs(60)));
+        for i in 0..4 {
+            b.record(i, Outcome::ServerError);
+            b.record(i, Outcome::ServerError);
+        }
+        let ejected = b.hosts().iter().filter(|h| h.state.is_ejected()).count();
+        assert_eq!(
+            ejected, 1,
+            "10% of 4 rounds down to 0, but one may always go"
+        );
+    }
+
+    #[test]
+    fn sweep_returns_hosts_after_the_ejection() {
+        let b = ClusterBalancer::new(hosts(2), Policy::RoundRobin, 0, 0)
+            .with_outlier_detection(outlier(100, std::time::Duration::from_millis(20)));
+        b.record(0, Outcome::GatewayFailure);
+        b.record(0, Outcome::GatewayFailure);
+        assert_eq!(b.host_set().len(), 1);
+        assert!(!b.sweep_ejections());
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(b.sweep_ejections());
+        assert_eq!(b.host_set().len(), 2);
+    }
+
+    #[test]
+    fn without_outlier_detection_failures_are_ignored() {
+        let b = ClusterBalancer::new(hosts(2), Policy::RoundRobin, 0, 0);
+        for _ in 0..10 {
+            b.record(0, Outcome::GatewayFailure);
+        }
+        assert_eq!(b.host_set().len(), 2);
     }
 
     #[test]
