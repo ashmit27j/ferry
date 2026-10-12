@@ -12,7 +12,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use ferry_lb::RequestGuard;
 use http_body_util::combinators::BoxBody;
-use http_body_util::{Either, Empty};
+use http_body_util::{Either, Full};
 use hyper::body::{Body, Frame, Incoming, SizeHint};
 use tokio::time::Sleep;
 
@@ -22,9 +22,9 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// Body of every response Ferry produces.
 pub type ProxyBody = BoxBody<Bytes, BoxError>;
 
-/// Body of requests sent upstream: the downstream body, or nothing when a
-/// bodiless request is replayed on another endpoint.
-pub(crate) type UpstreamBody = Either<RequestBody, Empty<Bytes>>;
+/// Body of requests sent upstream: the streamed downstream body, or a
+/// buffered copy that can be sent again on retry.
+pub(crate) type UpstreamBody = Either<RequestBody, Full<Bytes>>;
 
 /// The downstream request body was larger than the listener allows.
 #[derive(Debug, Clone, Copy, thiserror::Error)]
