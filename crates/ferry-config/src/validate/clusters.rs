@@ -112,6 +112,21 @@ impl Validator {
             self.err(format!("{at}.connect_timeout"), "must be greater than 0");
         }
 
+        let tls = cluster
+            .tls
+            .as_ref()
+            .and_then(|t| self.upstream_tls(&format!("{at}.tls"), t, &cluster.name));
+        let circuit_breakers = self.circuit_breakers(
+            &format!("{at}.circuit_breakers"),
+            cluster.circuit_breakers.as_ref(),
+        );
+        let outlier_detection = cluster
+            .outlier_detection
+            .as_ref()
+            .map(|o| self.outlier_detection(&format!("{at}.outlier_detection"), o));
+        let retry_budget =
+            self.retry_budget(&format!("{at}.retry_budget"), cluster.retry_budget.as_ref());
+
         Cluster {
             name: cluster.name.clone(),
             protocol: cluster.protocol,
@@ -120,6 +135,10 @@ impl Validator {
             health_check,
             panic_threshold,
             connect_timeout,
+            tls,
+            circuit_breakers,
+            outlier_detection,
+            retry_budget,
             endpoints,
         }
     }

@@ -5,6 +5,7 @@
 //! the offending field by path, such as `listeners[0].routes[1].rules[0]`.
 
 mod clusters;
+mod policy;
 mod routes;
 
 use std::collections::{HashMap, HashSet};
@@ -140,16 +141,32 @@ impl Validator {
                     .enumerate()
                     .map(|(i, rule)| self.rule(&format!("{r_at}.rules[{i}]"), rule, cluster_ids))
                     .collect();
+                let rate_limit = route
+                    .rate_limit
+                    .as_ref()
+                    .and_then(|r| self.rate_limit(&format!("{r_at}.rate_limit"), r));
                 routes.push(Route {
                     name: route.name.clone(),
                     hostnames,
                     rules,
+                    rate_limit,
                 });
             }
+            let tls = listener
+                .tls
+                .as_ref()
+                .and_then(|t| self.listener_tls(&format!("{at}.tls"), t));
+            let limits = self.limits(&format!("{at}.limits"), listener.limits.as_ref());
+            let timeouts =
+                self.listener_timeouts(&format!("{at}.timeouts"), listener.timeouts.as_ref());
             out.push(Listener {
                 name: listener.name.clone(),
                 address: listener.address,
                 routes,
+                tls,
+                proxy_protocol: listener.proxy_protocol,
+                limits,
+                timeouts,
             });
         }
         out

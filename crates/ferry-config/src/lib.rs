@@ -38,6 +38,7 @@ mod duration;
 mod error;
 mod load;
 mod model;
+mod policy;
 mod snapshot;
 mod validate;
 
@@ -50,6 +51,16 @@ pub use model::{
     HeaderValueConfig, HealthCheckConfig, HttpHealthCheckConfig, LbPolicy, ListenerConfig,
     MatchConfig, PathMatchConfig, PathMatchKind, PathRewriteConfig, QueryParamMatchConfig,
     RedirectConfig, RouteConfig, RuleConfig, StringMatchKind, UpstreamProtocol, UrlRewriteConfig,
+};
+pub use policy::{
+    CertificateConfig, CircuitBreakersConfig, ListenerLimitsConfig, ListenerTimeoutsConfig,
+    ListenerTlsConfig, OutlierDetectionConfig, RateLimitConfig, RateLimitKeyConfig,
+    RetryBudgetConfig, RetryConfig, RouteTimeoutsConfig, TlsVersion, UpstreamTlsConfig,
+};
+pub use snapshot::{
+    CaSource, CertificateSource, CircuitBreakers, Limits, ListenerTimeouts, ListenerTls,
+    OutlierDetection, RateLimit, RateLimitKey, RetryBudget, RetryPolicy, RouteTimeouts, Secret,
+    UpstreamTls,
 };
 pub use snapshot::{
     Cluster, ClusterId, Endpoint, Filter, HashPolicy, HeaderMatch, HeaderModifier, HealthCheck,

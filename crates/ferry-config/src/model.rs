@@ -19,6 +19,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::duration::Duration;
+use crate::policy::{
+    CircuitBreakersConfig, ListenerLimitsConfig, ListenerTimeoutsConfig, ListenerTlsConfig,
+    OutlierDetectionConfig, RateLimitConfig, RetryBudgetConfig, RetryConfig, RouteTimeoutsConfig,
+    UpstreamTlsConfig,
+};
 
 /// Root of a Ferry configuration file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -44,6 +49,19 @@ pub struct ListenerConfig {
     /// Routes evaluated for requests on this listener.
     #[serde(default)]
     pub routes: Vec<RouteConfig>,
+    /// Terminate TLS on this listener. Absent means cleartext (HTTP/1.1 and h2c).
+    #[serde(default)]
+    pub tls: Option<ListenerTlsConfig>,
+    /// Expect a PROXY protocol header (v1 or v2) on every connection, as an
+    /// AWS NLB sends, and take the client address from it.
+    #[serde(default)]
+    pub proxy_protocol: bool,
+    /// Request size and concurrency limits.
+    #[serde(default)]
+    pub limits: Option<ListenerLimitsConfig>,
+    /// Connection-level timeouts.
+    #[serde(default)]
+    pub timeouts: Option<ListenerTimeoutsConfig>,
 }
 
 /// A set of rules that apply to one or more hostnames (Gateway API `HTTPRoute`).
@@ -59,6 +77,9 @@ pub struct RouteConfig {
     pub hostnames: Vec<String>,
     /// Rules evaluated in precedence order (see the router for the ordering).
     pub rules: Vec<RuleConfig>,
+    /// Local rate limit applied to every request this route matches.
+    #[serde(default)]
+    pub rate_limit: Option<RateLimitConfig>,
 }
 
 /// One routing rule: if any match succeeds, apply the filters and forward to
@@ -78,6 +99,12 @@ pub struct RuleConfig {
     /// empty when the rule has a `RequestRedirect` filter, and non-empty otherwise.
     #[serde(default)]
     pub backends: Vec<BackendRefConfig>,
+    /// Request timeouts.
+    #[serde(default)]
+    pub timeouts: Option<RouteTimeoutsConfig>,
+    /// Retries beyond the always-on safe retries.
+    #[serde(default)]
+    pub retry: Option<RetryConfig>,
 }
 
 /// Conditions that must all hold for a request to match a rule.
@@ -297,6 +324,18 @@ pub struct ClusterConfig {
     /// Upstream TCP connect timeout. Defaults to `5s`.
     #[serde(default)]
     pub connect_timeout: Option<Duration>,
+    /// TLS to the endpoints, optionally with a client certificate (mTLS).
+    #[serde(default)]
+    pub tls: Option<UpstreamTlsConfig>,
+    /// Concurrency limits; defaults apply when absent.
+    #[serde(default)]
+    pub circuit_breakers: Option<CircuitBreakersConfig>,
+    /// Passive ejection of endpoints that keep failing. Absent disables it.
+    #[serde(default)]
+    pub outlier_detection: Option<OutlierDetectionConfig>,
+    /// Cap on retries relative to traffic; defaults apply when absent.
+    #[serde(default)]
+    pub retry_budget: Option<RetryBudgetConfig>,
     /// Upstream endpoints. Must not be empty.
     pub endpoints: Vec<EndpointConfig>,
 }
@@ -452,6 +491,10 @@ impl ListenerConfig {
             name: name.into(),
             address,
             routes: Vec::new(),
+            tls: None,
+            proxy_protocol: false,
+            limits: None,
+            timeouts: None,
         }
     }
 }
@@ -464,6 +507,7 @@ impl RouteConfig {
             name: name.into(),
             hostnames: Vec::new(),
             rules,
+            rate_limit: None,
         }
     }
 }
@@ -559,6 +603,10 @@ impl ClusterConfig {
             health_check: None,
             panic_threshold: None,
             connect_timeout: None,
+            tls: None,
+            circuit_breakers: None,
+            outlier_detection: None,
+            retry_budget: None,
             endpoints,
         }
     }

@@ -11,6 +11,7 @@
 mod cluster;
 mod filter;
 mod matching;
+mod policy;
 mod ser;
 
 use std::fmt;
@@ -22,6 +23,11 @@ pub use cluster::{Cluster, Endpoint, HashPolicy, HealthCheck, HealthCheckKind};
 pub use filter::{Filter, HeaderModifier, PathRewrite, Redirect, RedirectTarget, UrlRewrite};
 pub use matching::{
     HeaderMatch, MatchPrecedence, PathMatch, Pattern, QueryParamMatch, RequestMatch, StringMatch,
+};
+pub use policy::{
+    CaSource, CertificateSource, CircuitBreakers, Limits, ListenerTimeouts, ListenerTls,
+    OutlierDetection, RateLimit, RateLimitKey, RetryBudget, RetryPolicy, RouteTimeouts, Secret,
+    UpstreamTls,
 };
 
 /// Monotonic configuration version, assigned by whoever builds the snapshot.
@@ -97,9 +103,37 @@ pub struct Listener {
     pub(crate) name: String,
     pub(crate) address: SocketAddr,
     pub(crate) routes: Vec<Route>,
+    pub(crate) tls: Option<ListenerTls>,
+    pub(crate) proxy_protocol: bool,
+    pub(crate) limits: Limits,
+    pub(crate) timeouts: ListenerTimeouts,
 }
 
 impl Listener {
+    /// TLS termination, if enabled.
+    #[must_use]
+    pub fn tls(&self) -> Option<&ListenerTls> {
+        self.tls.as_ref()
+    }
+
+    /// Whether connections start with a PROXY protocol header.
+    #[must_use]
+    pub fn proxy_protocol(&self) -> bool {
+        self.proxy_protocol
+    }
+
+    /// Request limits.
+    #[must_use]
+    pub fn limits(&self) -> &Limits {
+        &self.limits
+    }
+
+    /// Connection timeouts.
+    #[must_use]
+    pub fn timeouts(&self) -> &ListenerTimeouts {
+        &self.timeouts
+    }
+
     /// Listener name.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -125,9 +159,16 @@ pub struct Route {
     pub(crate) name: String,
     pub(crate) hostnames: Vec<HostMatch>,
     pub(crate) rules: Vec<Rule>,
+    pub(crate) rate_limit: Option<RateLimit>,
 }
 
 impl Route {
+    /// Local rate limit, if any.
+    #[must_use]
+    pub fn rate_limit(&self) -> Option<&RateLimit> {
+        self.rate_limit.as_ref()
+    }
+
     /// Route name.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -201,9 +242,23 @@ pub struct Rule {
     pub(crate) matches: Vec<RequestMatch>,
     pub(crate) filters: Vec<Filter>,
     pub(crate) backends: Vec<WeightedBackend>,
+    pub(crate) timeouts: RouteTimeouts,
+    pub(crate) retry: Option<RetryPolicy>,
 }
 
 impl Rule {
+    /// Request timeouts, with defaults filled in.
+    #[must_use]
+    pub fn timeouts(&self) -> &RouteTimeouts {
+        &self.timeouts
+    }
+
+    /// Retry policy, if any.
+    #[must_use]
+    pub fn retry(&self) -> Option<&RetryPolicy> {
+        self.retry.as_ref()
+    }
+
     /// Matches combined with OR. Never empty after validation.
     #[must_use]
     pub fn matches(&self) -> &[RequestMatch] {

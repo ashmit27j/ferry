@@ -6,6 +6,7 @@ use std::time::Duration;
 use http::HeaderName;
 use serde::Serialize;
 
+use super::policy::{CircuitBreakers, OutlierDetection, RetryBudget, UpstreamTls};
 use super::ser;
 pub use crate::model::{LbPolicy, UpstreamProtocol};
 
@@ -19,10 +20,38 @@ pub struct Cluster {
     pub(crate) health_check: Option<HealthCheck>,
     pub(crate) panic_threshold: u8,
     pub(crate) connect_timeout: Duration,
+    pub(crate) tls: Option<UpstreamTls>,
+    pub(crate) circuit_breakers: CircuitBreakers,
+    pub(crate) outlier_detection: Option<OutlierDetection>,
+    pub(crate) retry_budget: RetryBudget,
     pub(crate) endpoints: Vec<Endpoint>,
 }
 
 impl Cluster {
+    /// TLS to the endpoints, if enabled.
+    #[must_use]
+    pub fn tls(&self) -> Option<&UpstreamTls> {
+        self.tls.as_ref()
+    }
+
+    /// Concurrency limits.
+    #[must_use]
+    pub fn circuit_breakers(&self) -> &CircuitBreakers {
+        &self.circuit_breakers
+    }
+
+    /// Passive outlier detection, if enabled.
+    #[must_use]
+    pub fn outlier_detection(&self) -> Option<&OutlierDetection> {
+        self.outlier_detection.as_ref()
+    }
+
+    /// Retry budget.
+    #[must_use]
+    pub fn retry_budget(&self) -> &RetryBudget {
+        &self.retry_budget
+    }
+
     /// Cluster name.
     #[must_use]
     pub fn name(&self) -> &str {

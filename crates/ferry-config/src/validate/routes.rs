@@ -71,10 +71,17 @@ impl Validator {
             self.err(format!("{at}.backends"), "must list at least one backend");
         }
         let backends = self.backends(at, &rule.backends, cluster_ids);
+        let timeouts = self.route_timeouts(&format!("{at}.timeouts"), rule.timeouts.as_ref());
+        let retry = rule
+            .retry
+            .as_ref()
+            .map(|r| self.retry(&format!("{at}.retry"), r));
         Rule {
             matches,
             filters,
             backends,
+            timeouts,
+            retry,
         }
     }
 
