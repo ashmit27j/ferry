@@ -1,24 +1,30 @@
 //! Turns a parsed [`Config`] into a validated [`Snapshot`].
 //!
 //! Validation collects every problem rather than stopping at the first, so one
-//! `check-config` run reports everything wrong with a file.
+//! `check-config` run reports everything wrong with a file. Each problem names
+//! the offending field by path, such as `listeners[0].routes[1].rules[0]`.
+
+mod clusters;
+mod routes;
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 
 use crate::error::{ValidationError, ValidationErrors};
-use crate::model::{Config, PathMatchConfig, PathMatchKind};
-use crate::snapshot::{
-    Cluster, ClusterId, Endpoint, HostMatch, Listener, PathMatch, RequestMatch, Route, Rule,
-    Snapshot, SnapshotVersion, WeightedBackend,
-};
+use crate::model::Config;
+use crate::snapshot::{ClusterId, HostMatch, Listener, Route, Snapshot, SnapshotVersion};
 
 /// Largest accepted backend weight, matching the Gateway API limit.
 pub const MAX_BACKEND_WEIGHT: u32 = 1_000_000;
-/// Longest accepted path match value.
+/// Largest accepted endpoint weight, matching Envoy's `load_balancing_weight`.
+pub const MAX_ENDPOINT_WEIGHT: u32 = 128;
+/// Longest accepted path match value or regular expression.
 pub const MAX_PATH_LEN: usize = 1024;
 /// Longest accepted name for listeners, routes and clusters.
 pub const MAX_NAME_LEN: usize = 253;
+/// Most header or query conditions in one match, and most filters in one rule,
+/// as in the Gateway API.
+pub const MAX_CONDITIONS: usize = 16;
 
 impl Config {
     /// Validates this configuration and freezes it into a [`Snapshot`].
@@ -46,12 +52,12 @@ impl Config {
 }
 
 #[derive(Default)]
-struct Validator {
+pub(crate) struct Validator {
     errors: Vec<ValidationError>,
 }
 
 impl Validator {
-    fn err(&mut self, path: impl Into<String>, message: impl Into<String>) {
+    pub(crate) fn err(&mut self, path: impl Into<String>, message: impl Into<String>) {
         self.errors.push(ValidationError {
             path: path.into(),
             message: message.into(),
@@ -66,7 +72,7 @@ impl Validator {
         }
     }
 
-    fn name(&mut self, path: &str, name: &str) {
+    pub(crate) fn name(&mut self, path: &str, name: &str) {
         if name.is_empty() {
             self.err(path, "must not be empty");
         } else if name.len() > MAX_NAME_LEN {
@@ -80,47 +86,6 @@ impl Validator {
                 "may only contain ASCII letters, digits, '-', '_' and '.'",
             );
         }
-    }
-
-    fn clusters(&mut self, config: &Config) -> Vec<Cluster> {
-        let mut seen = HashSet::new();
-        let mut out = Vec::with_capacity(config.clusters.len());
-        for (ci, cluster) in config.clusters.iter().enumerate() {
-            let at = format!("clusters[{ci}]");
-            self.name(&format!("{at}.name"), &cluster.name);
-            if !seen.insert(cluster.name.as_str()) {
-                self.err(
-                    format!("{at}.name"),
-                    format!("duplicate cluster name {:?}", cluster.name),
-                );
-            }
-            if cluster.endpoints.is_empty() {
-                self.err(format!("{at}.endpoints"), "must list at least one endpoint");
-            }
-            let mut addrs = HashSet::new();
-            let mut endpoints = Vec::with_capacity(cluster.endpoints.len());
-            for (ei, ep) in cluster.endpoints.iter().enumerate() {
-                let ep_at = format!("{at}.endpoints[{ei}].address");
-                if ep.address.port() == 0 {
-                    self.err(&ep_at, "port must not be 0");
-                }
-                if ep.address.ip().is_unspecified() {
-                    self.err(&ep_at, "must not be an unspecified address");
-                }
-                if !addrs.insert(ep.address) {
-                    self.err(&ep_at, format!("duplicate endpoint {}", ep.address));
-                }
-                endpoints.push(Endpoint {
-                    address: ep.address,
-                });
-            }
-            out.push(Cluster {
-                name: cluster.name.clone(),
-                lb_policy: cluster.lb_policy,
-                endpoints,
-            });
-        }
-        out
     }
 
     fn listeners(
@@ -173,27 +138,7 @@ impl Validator {
                     .rules
                     .iter()
                     .enumerate()
-                    .map(|(ri2, rule)| {
-                        let rule_at = format!("{r_at}.rules[{ri2}]");
-                        let matches = if rule.matches.is_empty() {
-                            vec![RequestMatch {
-                                path: PathMatch::Prefix("/".into()),
-                            }]
-                        } else {
-                            rule.matches
-                                .iter()
-                                .enumerate()
-                                .map(|(mi, m)| RequestMatch {
-                                    path: self.path_match(
-                                        &format!("{rule_at}.matches[{mi}].path"),
-                                        m.path.as_ref(),
-                                    ),
-                                })
-                                .collect()
-                        };
-                        let backends = self.backends(&rule_at, &rule.backends, cluster_ids);
-                        Rule { matches, backends }
-                    })
+                    .map(|(i, rule)| self.rule(&format!("{r_at}.rules[{i}]"), rule, cluster_ids))
                     .collect();
                 routes.push(Route {
                     name: route.name.clone(),
@@ -208,71 +153,6 @@ impl Validator {
             });
         }
         out
-    }
-
-    fn backends(
-        &mut self,
-        rule_at: &str,
-        refs: &[crate::model::BackendRefConfig],
-        cluster_ids: &HashMap<&str, ClusterId>,
-    ) -> Vec<WeightedBackend> {
-        if refs.is_empty() {
-            self.err(
-                format!("{rule_at}.backends"),
-                "must list at least one backend",
-            );
-        }
-        let mut out = Vec::with_capacity(refs.len());
-        for (bi, backend) in refs.iter().enumerate() {
-            let b_at = format!("{rule_at}.backends[{bi}]");
-            if backend.weight > MAX_BACKEND_WEIGHT {
-                self.err(
-                    format!("{b_at}.weight"),
-                    format!("must be at most {MAX_BACKEND_WEIGHT}"),
-                );
-            }
-            match cluster_ids.get(backend.cluster.as_str()) {
-                Some(&cluster) => out.push(WeightedBackend {
-                    cluster,
-                    weight: backend.weight,
-                }),
-                None => self.err(
-                    format!("{b_at}.cluster"),
-                    format!("unknown cluster {:?}", backend.cluster),
-                ),
-            }
-        }
-        out
-    }
-
-    fn path_match(&mut self, at: &str, path: Option<&PathMatchConfig>) -> PathMatch {
-        let Some(path) = path else {
-            return PathMatch::Prefix("/".into());
-        };
-        let value = path.value.as_str();
-        if !value.starts_with('/') {
-            self.err(format!("{at}.value"), "must start with '/'");
-        }
-        if value.len() > MAX_PATH_LEN {
-            self.err(
-                format!("{at}.value"),
-                format!("must be at most {MAX_PATH_LEN} bytes"),
-            );
-        }
-        if value.contains(['?', '#']) || value.chars().any(char::is_whitespace) {
-            self.err(
-                format!("{at}.value"),
-                "must not contain '?', '#' or whitespace",
-            );
-        }
-        match path.kind {
-            PathMatchKind::Exact => PathMatch::Exact(value.to_owned()),
-            PathMatchKind::PathPrefix => {
-                // The Gateway API ignores a trailing slash on prefixes.
-                let trimmed = value.trim_end_matches('/');
-                PathMatch::Prefix(if trimmed.is_empty() { "/" } else { trimmed }.to_owned())
-            }
-        }
     }
 
     fn hostname(&mut self, at: &str, raw: &str) -> Option<HostMatch> {
@@ -298,10 +178,21 @@ impl Validator {
             HostMatch::Exact(name.to_owned())
         })
     }
+
+    /// A plain (non-wildcard) DNS name, lowercased; `None` after reporting.
+    pub(crate) fn plain_hostname(&mut self, at: &str, raw: &str) -> Option<String> {
+        let host = raw.to_ascii_lowercase();
+        if is_dns_subdomain(&host) {
+            Some(host)
+        } else {
+            self.err(at, format!("{raw:?} is not a valid hostname"));
+            None
+        }
+    }
 }
 
 /// RFC 1123 subdomain check on an already-lowercased name.
-fn is_dns_subdomain(name: &str) -> bool {
+pub(crate) fn is_dns_subdomain(name: &str) -> bool {
     if name.is_empty() || name.len() > 253 {
         return false;
     }
@@ -317,14 +208,24 @@ fn is_dns_subdomain(name: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::load::from_yaml_str;
+    use crate::snapshot::PathMatch;
 
-    fn snapshot(yaml: &str) -> Result<Snapshot, ValidationErrors> {
+    pub(crate) fn snapshot(yaml: &str) -> Result<Snapshot, ValidationErrors> {
         from_yaml_str(yaml)
             .expect("test yaml parses")
             .into_snapshot(SnapshotVersion(1))
+    }
+
+    /// Asserts that validation fails with an error at each of `paths`.
+    pub(crate) fn assert_errors_at(yaml: &str, paths: &[&str]) {
+        let errs = snapshot(yaml).expect_err("config should be invalid").0;
+        let got: Vec<&str> = errs.iter().map(|e| e.path.as_str()).collect();
+        for want in paths {
+            assert!(got.contains(want), "missing {want} in {errs:#?}");
+        }
     }
 
     const VALID: &str = r#"
@@ -383,19 +284,18 @@ clusters:
   - name: c
     endpoints: []
 "#;
-        let errs = snapshot(yaml).expect_err("invalid").0;
-        let paths: Vec<&str> = errs.iter().map(|e| e.path.as_str()).collect();
-        for want in [
-            "clusters[0].endpoints",
-            "listeners[0].routes[0].hostnames[0]",
-            "listeners[0].routes[0].hostnames[1]",
-            "listeners[0].routes[0].rules[0].matches[0].path.value",
-            "listeners[0].routes[0].rules[0].backends[0].cluster",
-            "listeners[1].name",
-            "listeners[1].address",
-        ] {
-            assert!(paths.contains(&want), "missing {want} in {paths:?}");
-        }
+        assert_errors_at(
+            yaml,
+            &[
+                "clusters[0].endpoints",
+                "listeners[0].routes[0].hostnames[0]",
+                "listeners[0].routes[0].hostnames[1]",
+                "listeners[0].routes[0].rules[0].matches[0].path.value",
+                "listeners[0].routes[0].rules[0].backends[0].cluster",
+                "listeners[1].name",
+                "listeners[1].address",
+            ],
+        );
     }
 
     #[test]
@@ -409,8 +309,10 @@ clusters:
     #[test]
     fn rejects_overweight_backend() {
         let yaml = VALID.replace("weight: 90", "weight: 1000001");
-        let errs = snapshot(&yaml).expect_err("invalid").0;
-        assert!(errs.iter().any(|e| e.path.ends_with("backends[0].weight")));
+        assert_errors_at(
+            &yaml,
+            &["listeners[0].routes[0].rules[0].backends[0].weight"],
+        );
     }
 
     #[test]
@@ -420,6 +322,40 @@ clusters:
         assert!(!is_dns_subdomain("a..example"));
         assert!(!is_dns_subdomain(&"a".repeat(64)));
         assert!(!is_dns_subdomain("UPPER.example"));
+    }
+
+    #[test]
+    fn snapshot_serializes_to_json() {
+        let yaml = r#"
+listeners:
+  - name: l
+    address: 127.0.0.1:0
+    routes:
+      - name: r
+        rules:
+          - matches: [{ path: { type: RegularExpression, value: '/u/\d+' }, method: GET, headers: [{ name: x-a, value: "1" }] }]
+            filters:
+              - { type: RequestHeaderModifier, set: [{ name: x-b, value: "2" }], remove: [x-c] }
+              - { type: URLRewrite, hostname: in.example }
+            backends: [{ cluster: c }]
+clusters:
+  - { name: c, lb_policy: maglev, hash_policy: { header: x-user }, endpoints: [{ address: 10.0.0.1:80 }] }
+"#;
+        let json = serde_json::to_value(snapshot(yaml).unwrap()).unwrap();
+        let rule = &json["listeners"][0]["routes"][0]["rules"][0];
+        assert_eq!(rule["matches"][0]["method"], "GET");
+        assert_eq!(rule["matches"][0]["path"]["Regex"], r"/u/\d+");
+        assert_eq!(rule["matches"][0]["headers"][0]["name"], "x-a");
+        assert_eq!(
+            rule["filters"][0]["RequestHeaderModifier"]["set"][0][0],
+            "x-b"
+        );
+        assert_eq!(
+            rule["filters"][0]["RequestHeaderModifier"]["remove"][0],
+            "x-c"
+        );
+        assert_eq!(rule["filters"][1]["UrlRewrite"]["hostname"], "in.example");
+        assert_eq!(json["clusters"][0]["hash_policy"]["Header"], "x-user");
     }
 
     #[test]

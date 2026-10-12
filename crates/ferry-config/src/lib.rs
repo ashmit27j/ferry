@@ -25,25 +25,41 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! The public API of this crate is not yet frozen; it freezes at the end of M1.
+//! # API stability
+//!
+//! The public API is frozen as of M1 ([ADR 0013]). Structs and enums are
+//! `#[non_exhaustive]` and snapshot fields are private, so new optional
+//! fields, variants and accessors are additive changes. Removing or changing
+//! anything listed here needs a superseding ADR.
+//!
+//! [ADR 0013]: https://github.com/ashmit27j/ferry/blob/main/docs/adr/0013-freeze-ferry-config-api.md
 
+mod duration;
 mod error;
 mod load;
 mod model;
 mod snapshot;
 mod validate;
 
+pub use duration::{Duration, ParseDurationError};
 pub use error::{ConfigError, ValidationError, ValidationErrors};
 pub use load::{MAX_CONFIG_BYTES, from_yaml_str, load_file, load_snapshot};
 pub use model::{
-    BackendRefConfig, ClusterConfig, Config, EndpointConfig, LbPolicy, ListenerConfig, MatchConfig,
-    PathMatchConfig, PathMatchKind, RouteConfig, RuleConfig,
+    BackendRefConfig, ClusterConfig, Config, CookieHashConfig, EndpointConfig, FilterConfig,
+    GrpcHealthCheckConfig, HashPolicyConfig, HeaderMatchConfig, HeaderModifierConfig,
+    HeaderValueConfig, HealthCheckConfig, HttpHealthCheckConfig, LbPolicy, ListenerConfig,
+    MatchConfig, PathMatchConfig, PathMatchKind, PathRewriteConfig, QueryParamMatchConfig,
+    RedirectConfig, RouteConfig, RuleConfig, StringMatchKind, UpstreamProtocol, UrlRewriteConfig,
 };
 pub use snapshot::{
-    Cluster, ClusterId, Endpoint, HostMatch, HostSpecificity, Listener, PathMatch, RequestMatch,
-    Route, Rule, Snapshot, SnapshotVersion, WeightedBackend,
+    Cluster, ClusterId, Endpoint, Filter, HashPolicy, HeaderMatch, HeaderModifier, HealthCheck,
+    HealthCheckKind, HostMatch, HostSpecificity, Listener, MatchPrecedence, PathMatch, PathRewrite,
+    Pattern, QueryParamMatch, Redirect, RedirectTarget, RequestMatch, Route, Rule, Snapshot,
+    SnapshotVersion, StringMatch, UrlRewrite, WeightedBackend,
 };
-pub use validate::{MAX_BACKEND_WEIGHT, MAX_NAME_LEN, MAX_PATH_LEN};
+pub use validate::{
+    MAX_BACKEND_WEIGHT, MAX_CONDITIONS, MAX_ENDPOINT_WEIGHT, MAX_NAME_LEN, MAX_PATH_LEN,
+};
 
 /// JSON Schema for the configuration file format, for editors and `check-config --schema`.
 #[must_use]

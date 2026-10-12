@@ -585,7 +585,9 @@ dependencies = [
 name = "ferry-config"
 version = "0.1.0"
 dependencies = [
+ "http",
  "proptest",
+ "regex",
  "schemars",
  "serde",
  "serde-saphyr",

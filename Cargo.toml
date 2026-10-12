@@ -43,6 +43,9 @@ http = "1.5"
 http-body-util = "0.1.5"
 bytes = "1.12"
 arc-swap = "1.9"
+regex = "1.13"
+crossbeam-queue = "0.3.12"
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash64"] }
 
 # gRPC
 tonic = "0.14.6"

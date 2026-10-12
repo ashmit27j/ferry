@@ -4,13 +4,25 @@
 //! be built by [`Config::into_snapshot`](crate::Config::into_snapshot), so holding
 //! one proves that every cross-reference resolves and every value is in range.
 //! Snapshots are never mutated: a reload builds a new one and swaps it in.
+//!
+//! Every type here has private fields and read-only accessors, and every enum is
+//! `#[non_exhaustive]`, so the API can grow without breaking (ADR 0013).
+
+mod cluster;
+mod filter;
+mod matching;
+mod ser;
 
 use std::fmt;
 use std::net::SocketAddr;
 
 use serde::Serialize;
 
-pub use crate::model::LbPolicy;
+pub use cluster::{Cluster, Endpoint, HashPolicy, HealthCheck, HealthCheckKind};
+pub use filter::{Filter, HeaderModifier, PathRewrite, Redirect, RedirectTarget, UrlRewrite};
+pub use matching::{
+    HeaderMatch, MatchPrecedence, PathMatch, Pattern, QueryParamMatch, RequestMatch, StringMatch,
+};
 
 /// Monotonic configuration version, assigned by whoever builds the snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -43,6 +55,12 @@ impl Snapshot {
         &self.listeners
     }
 
+    /// Finds a listener by name.
+    #[must_use]
+    pub fn listener(&self, name: &str) -> Option<&Listener> {
+        self.listeners.iter().find(|l| l.name == name)
+    }
+
     /// Clusters in file order. [`ClusterId`] indexes into this slice.
     #[must_use]
     pub fn clusters(&self) -> &[Cluster] {
@@ -60,8 +78,16 @@ impl Snapshot {
     pub fn cluster_id(&self, name: &str) -> Option<ClusterId> {
         self.clusters
             .iter()
-            .position(|c| c.name == name)
+            .position(|c| c.name() == name)
             .map(ClusterId)
+    }
+
+    /// The same snapshot with a different version, for callers that number
+    /// snapshots after validating them (such as the file watcher).
+    #[must_use]
+    pub fn with_version(mut self, version: SnapshotVersion) -> Self {
+        self.version = version;
+        self
     }
 }
 
@@ -133,7 +159,8 @@ impl Route {
 }
 
 /// How specifically a route's hostname matched, ordered from least to most specific.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum HostSpecificity {
     /// The route lists no hostnames.
     Any,
@@ -144,7 +171,8 @@ pub enum HostSpecificity {
 }
 
 /// A hostname matcher.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[non_exhaustive]
 pub enum HostMatch {
     /// Exact, lowercase hostname.
     Exact(String),
@@ -167,10 +195,11 @@ impl HostMatch {
     }
 }
 
-/// A rule: OR of matches, then a weighted split across backends.
+/// A rule: OR of matches, then filters, then a weighted split across backends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Rule {
     pub(crate) matches: Vec<RequestMatch>,
+    pub(crate) filters: Vec<Filter>,
     pub(crate) backends: Vec<WeightedBackend>,
 }
 
@@ -181,65 +210,25 @@ impl Rule {
         &self.matches
     }
 
-    /// Backends with non-zero total weight.
+    /// Filters in the order they apply.
+    #[must_use]
+    pub fn filters(&self) -> &[Filter] {
+        &self.filters
+    }
+
+    /// The redirect filter, if the rule answers with a redirect.
+    #[must_use]
+    pub fn redirect(&self) -> Option<&Redirect> {
+        self.filters.iter().find_map(|f| match f {
+            Filter::RequestRedirect(r) => Some(r),
+            _ => None,
+        })
+    }
+
+    /// Backends. Empty only for redirect rules.
     #[must_use]
     pub fn backends(&self) -> &[WeightedBackend] {
         &self.backends
-    }
-}
-
-/// Conditions that must all hold.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RequestMatch {
-    pub(crate) path: PathMatch,
-}
-
-impl RequestMatch {
-    /// The path condition.
-    #[must_use]
-    pub fn path(&self) -> &PathMatch {
-        &self.path
-    }
-}
-
-/// A path condition.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum PathMatch {
-    /// Path equals the value.
-    Exact(String),
-    /// Path starts with the value on a `/` boundary. Stored without a trailing
-    /// slash, except for the root prefix `/`.
-    Prefix(String),
-}
-
-impl PathMatch {
-    /// Returns true if `path` (without query string) satisfies this condition.
-    ///
-    /// Prefix matching follows the Gateway API: `/foo` matches `/foo`, `/foo/`
-    /// and `/foo/bar`, but not `/foobar`.
-    #[must_use]
-    pub fn matches(&self, path: &str) -> bool {
-        match self {
-            Self::Exact(value) => path == value,
-            Self::Prefix(prefix) => {
-                if prefix == "/" {
-                    return path.starts_with('/');
-                }
-                match path.strip_prefix(prefix.as_str()) {
-                    Some(rest) => rest.is_empty() || rest.starts_with('/'),
-                    None => false,
-                }
-            }
-        }
-    }
-
-    /// Precedence key: exact matches beat prefixes, longer prefixes beat shorter.
-    #[must_use]
-    pub fn precedence(&self) -> (u8, usize) {
-        match self {
-            Self::Exact(value) => (1, value.len()),
-            Self::Prefix(prefix) => (0, prefix.len()),
-        }
     }
 }
 
@@ -276,75 +265,9 @@ impl WeightedBackend {
     }
 }
 
-/// A group of upstream endpoints.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Cluster {
-    pub(crate) name: String,
-    pub(crate) lb_policy: LbPolicy,
-    pub(crate) endpoints: Vec<Endpoint>,
-}
-
-impl Cluster {
-    /// Cluster name.
-    #[must_use]
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// Load-balancing policy.
-    #[must_use]
-    pub fn lb_policy(&self) -> LbPolicy {
-        self.lb_policy
-    }
-
-    /// Endpoints. Never empty after validation.
-    #[must_use]
-    pub fn endpoints(&self) -> &[Endpoint] {
-        &self.endpoints
-    }
-}
-
-/// One upstream address.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Endpoint {
-    pub(crate) address: SocketAddr,
-}
-
-impl Endpoint {
-    /// Socket address.
-    #[must_use]
-    pub fn address(&self) -> SocketAddr {
-        self.address
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn prefix_matches_on_element_boundary() {
-        let m = PathMatch::Prefix("/foo".into());
-        assert!(m.matches("/foo"));
-        assert!(m.matches("/foo/"));
-        assert!(m.matches("/foo/bar"));
-        assert!(!m.matches("/foobar"));
-        assert!(!m.matches("/fo"));
-    }
-
-    #[test]
-    fn root_prefix_matches_everything() {
-        let m = PathMatch::Prefix("/".into());
-        assert!(m.matches("/"));
-        assert!(m.matches("/anything/at/all"));
-    }
-
-    #[test]
-    fn exact_match_is_exact() {
-        let m = PathMatch::Exact("/healthz".into());
-        assert!(m.matches("/healthz"));
-        assert!(!m.matches("/healthz/"));
-    }
 
     #[test]
     fn wildcard_requires_at_least_one_label() {
@@ -360,5 +283,10 @@ mod tests {
         assert!(HostSpecificity::Exact > HostSpecificity::Wildcard(100));
         assert!(HostSpecificity::Wildcard(1) > HostSpecificity::Any);
         assert!(HostSpecificity::Wildcard(12) > HostSpecificity::Wildcard(4));
+    }
+
+    #[test]
+    fn version_displays_with_prefix() {
+        assert_eq!(SnapshotVersion(7).to_string(), "v7");
     }
 }
