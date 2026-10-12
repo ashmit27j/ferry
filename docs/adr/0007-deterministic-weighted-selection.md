@@ -1,6 +1,6 @@
 # ADR 0007: Split weighted backends deterministically with a golden-ratio stride
 
-- **Status:** Accepted
+- **Status:** Accepted; counters now survive reloads that leave the routes unchanged ([ADR 0014](0014-state-across-reloads.md))
 - **Date:** 2026-10-13
 - **Milestone:** M0
 

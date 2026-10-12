@@ -1,6 +1,6 @@
 # ADR 0005: Gateway API-shaped config, validated into immutable snapshots
 
-- **Status:** Accepted (shape may change until the M1 API freeze)
+- **Status:** Accepted; precedence amended by [ADR 0009](0009-route-matching-and-precedence.md), reload state by [ADR 0014](0014-state-across-reloads.md), API frozen by [ADR 0013](0013-freeze-ferry-config-api.md)
 - **Date:** 2026-10-13
 - **Milestone:** M0
 
