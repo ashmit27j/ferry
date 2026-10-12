@@ -43,6 +43,22 @@ fn check_config_accepts_hello_example() {
 }
 
 #[test]
+fn check_config_accepts_every_example() {
+    for entry in std::fs::read_dir(repo_root().join("examples")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "yaml") {
+            let out = ferry(&["check-config", path.to_str().unwrap()]);
+            assert!(
+                out.status.success(),
+                "{}: {}",
+                path.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+}
+
+#[test]
 fn check_config_reports_every_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bad.yaml");
@@ -137,4 +153,81 @@ async fn proxy_forwards_to_mock_backend() {
     assert_eq!(echo["backend"], "hello");
     assert_eq!(echo["path"], "/hello");
     assert_eq!(backend.stats().requests(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn proxy_hot_reloads_when_the_config_file_changes() {
+    let a = mock_http::spawn("127.0.0.1:0".parse().unwrap(), Behavior::named("a"))
+        .await
+        .unwrap();
+    let b = mock_http::spawn("127.0.0.1:0".parse().unwrap(), Behavior::named("b"))
+        .await
+        .unwrap();
+    let listen = free_port();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ferry.yaml");
+    let template = std::fs::read_to_string(repo_root().join("examples/hello.yaml"))
+        .unwrap()
+        .replace("127.0.0.1:8080", &listen.to_string());
+    std::fs::write(
+        &config,
+        template.replace("127.0.0.1:9001", &a.addr().to_string()),
+    )
+    .unwrap();
+
+    let _child = ChildGuard(
+        Command::new(FERRY)
+            .args([
+                "proxy",
+                "--config",
+                config.to_str().unwrap(),
+                "--watch-interval-ms",
+                "100",
+            ])
+            .env("FERRY_LOG", "error")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let client = Client::builder(TokioExecutor::new()).build_http::<Empty<bytes::Bytes>>();
+    let uri: http::Uri = format!("http://{listen}/").parse().unwrap();
+    let backend = |client: Client<_, Empty<bytes::Bytes>>, uri: http::Uri| async move {
+        let resp = client.get(uri).await.ok()?;
+        resp.headers()
+            .get(mock_http::BACKEND_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    let wait_for = |want: &'static str| {
+        let client = client.clone();
+        let uri = uri.clone();
+        async move {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                if backend(client.clone(), uri.clone()).await.as_deref() == Some(want) {
+                    return;
+                }
+                assert!(Instant::now() < deadline, "never served by {want}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    wait_for("a").await;
+
+    std::fs::write(
+        &config,
+        template.replace("127.0.0.1:9001", &b.addr().to_string()),
+    )
+    .unwrap();
+    wait_for("b").await;
+
+    // A broken file is rejected and the last good config keeps serving.
+    std::fs::write(&config, "listeners: [").unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        backend(client.clone(), uri.clone()).await.as_deref(),
+        Some("b")
+    );
 }

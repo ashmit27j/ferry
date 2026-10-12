@@ -566,6 +566,7 @@ dependencies = [
  "tempfile",
  "tikv-jemallocator",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

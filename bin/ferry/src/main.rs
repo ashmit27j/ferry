@@ -41,6 +41,10 @@ enum Command {
         /// Seconds to wait for in-flight requests on shutdown.
         #[arg(long, default_value_t = ferry_proxy::DEFAULT_DRAIN_TIMEOUT.as_secs())]
         drain_timeout_secs: u64,
+        /// Milliseconds between checks of the config file for changes; 0
+        /// disables hot reload.
+        #[arg(long, default_value_t = 1000)]
+        watch_interval_ms: u64,
     },
     /// Run the Kubernetes control plane (milestone M4).
     Controller,
@@ -76,12 +80,17 @@ fn run(command: Command) -> anyhow::Result<ExitCode> {
         Command::Proxy {
             config,
             drain_timeout_secs,
+            watch_interval_ms,
         } => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .context("building tokio runtime")?;
-            runtime.block_on(proxy(config, Duration::from_secs(drain_timeout_secs)))?;
+            runtime.block_on(proxy(
+                config,
+                Duration::from_secs(drain_timeout_secs),
+                Duration::from_millis(watch_interval_ms),
+            ))?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Controller => {
@@ -95,12 +104,23 @@ fn run(command: Command) -> anyhow::Result<ExitCode> {
     }
 }
 
-async fn proxy(config: PathBuf, drain_timeout: Duration) -> anyhow::Result<()> {
+async fn proxy(config: PathBuf, drain_timeout: Duration, watch: Duration) -> anyhow::Result<()> {
     let snapshot = ferry_config::load_snapshot(&config, SnapshotVersion(1))
         .with_context(|| format!("loading {}", config.display()))?;
     info!(config = %config.display(), version = %snapshot.version(), "config loaded");
     let proxy = ferry_proxy::Proxy::bind(snapshot).await?;
-    proxy.run(shutdown_signal(), drain_timeout).await?;
+    let stop_watching = tokio_util::sync::CancellationToken::new();
+    if !watch.is_zero() {
+        tokio::spawn(ferry_proxy::watch::watch_file(
+            config.clone(),
+            proxy.reload_handle(),
+            watch,
+            stop_watching.clone(),
+        ));
+    }
+    let result = proxy.run(shutdown_signal(), drain_timeout).await;
+    stop_watching.cancel();
+    result?;
     Ok(())
 }
 
