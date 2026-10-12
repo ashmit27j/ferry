@@ -5,14 +5,17 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
 use ferry_config::{Snapshot, SnapshotVersion};
 use ferry_proxy::{Proxy, ProxyError, ReloadHandle};
 use http::{HeaderMap, Request, StatusCode};
-use http_body_util::{BodyExt, Empty};
+use http_body_util::{BodyExt, Empty, Full};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use tokio::sync::oneshot;
@@ -183,4 +186,114 @@ pub fn dead_addr() -> SocketAddr {
 #[must_use]
 pub fn any_port() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 0))
+}
+
+/// Sends a request with any method and body over HTTP/1.1.
+pub async fn request(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &'static str,
+) -> Reply {
+    let client = Client::builder(TokioExecutor::new()).build_http::<Full<Bytes>>();
+    let mut req = Request::builder()
+        .method(method)
+        .uri(format!("http://{addr}{path}"));
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let resp = client
+        .request(
+            req.body(Full::new(Bytes::from_static(body.as_bytes())))
+                .unwrap(),
+        )
+        .await
+        .expect("request reaches proxy");
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    Reply {
+        status,
+        headers,
+        body,
+    }
+}
+
+/// What a load run saw.
+#[derive(Debug, Default)]
+pub struct LoadReport {
+    /// Requests answered 200.
+    pub ok: u64,
+    /// Every other outcome: a status code or a client error.
+    pub failures: Vec<String>,
+    /// 200 responses per backend name (from the mock's response header).
+    pub by_backend: HashMap<String, u64>,
+}
+
+/// Runs `concurrency` keep-alive clients sending `GET /` in a loop until
+/// `stop` resolves, then reports what they saw.
+pub async fn run_load(
+    addr: SocketAddr,
+    concurrency: usize,
+    stop: impl std::future::Future<Output = ()>,
+) -> LoadReport {
+    let running = Arc::new(AtomicBool::new(true));
+    let mut tasks = Vec::new();
+    for _ in 0..concurrency {
+        let running = Arc::clone(&running);
+        tasks.push(tokio::spawn(async move {
+            let client = Client::builder(TokioExecutor::new()).build_http::<Empty<Bytes>>();
+            let mut report = LoadReport::default();
+            while running.load(Ordering::Relaxed) {
+                let req = Request::get(format!("http://{addr}/"))
+                    .body(Empty::new())
+                    .unwrap();
+                match client.request(req).await {
+                    Ok(resp) if resp.status() == StatusCode::OK => {
+                        let backend = resp
+                            .headers()
+                            .get(ferry_testkit::http::BACKEND_HEADER)
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("?")
+                            .to_owned();
+                        let _ = resp.into_body().collect().await;
+                        report.ok += 1;
+                        *report.by_backend.entry(backend).or_default() += 1;
+                    }
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let body = resp.into_body().collect().await.map(|b| b.to_bytes());
+                        report.failures.push(format!("{status}: {body:?}"));
+                    }
+                    Err(e) => report.failures.push(format!("client error: {e:?}")),
+                }
+            }
+            report
+        }));
+    }
+    stop.await;
+    running.store(false, Ordering::Relaxed);
+    let mut total = LoadReport::default();
+    for t in tasks {
+        let r = t.await.unwrap();
+        total.ok += r.ok;
+        total.failures.extend(r.failures);
+        for (k, v) in r.by_backend {
+            *total.by_backend.entry(k).or_default() += v;
+        }
+    }
+    total
+}
+
+/// Polls `cond` every 10 ms until it holds, panicking after `timeout`.
+pub async fn eventually(timeout: Duration, mut cond: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while !cond() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "condition not met within {timeout:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }

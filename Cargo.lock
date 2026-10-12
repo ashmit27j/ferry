@@ -625,8 +625,11 @@ dependencies = [
  "http-body-util",
  "hyper-util",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tokio-stream",
  "tokio-util",
+ "tonic",
 ]
 
 [[package]]
