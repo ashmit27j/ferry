@@ -31,3 +31,23 @@ constant-arrival-rate executor so slow responses do not reduce offered load
 dropped iteration.
 
 Record every gate run in [`RESULTS.md`](RESULTS.md) with the environment.
+
+## Milestone exit tests (Linux, in Docker)
+
+`bench/exit/run-m1.sh` runs the M1 exit test entirely inside one Linux network
+namespace, so Docker Desktop's port forwarding is not in the path: three mock
+backends (cores 4-9), Ferry pinned to one core (core 0), a reloader that rewrites
+the config every second, and k6 on cores 10-19 sharing the container's network.
+
+```sh
+# 1. Build Linux release binaries into a Docker volume (not into ./target).
+MSYS_NO_PATHCONV=1 docker run --rm -v "$PWD:/src" -v ferry-target:/target \
+  -v ferry-cargo:/usr/local/cargo/registry -e CARGO_TARGET_DIR=/target -w /src \
+  rust:1.99.0-bookworm cargo build --release --locked -p ferry -p ferry-testkit --bins
+# 2. Run: baseline (k6 -> backend), steady (k6 -> Ferry), chaos (reloads + kill).
+bench/exit/run-m1.sh
+```
+
+k6 summaries land in `bench/exit/results/`. `bench/exit/sockets.sh` counts
+upstream and downstream sockets by TCP state inside the container, which is how
+connection churn is checked.

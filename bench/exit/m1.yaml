@@ -1,0 +1,27 @@
+# Config for the M1 exit test (bench/exit/run-m1.sh). The reloader rewrites
+# this file every second, flipping RELOAD_MARK, so every reload is a real
+# change that the proxy must validate, rebuild and swap.
+listeners:
+  - name: http
+    address: 0.0.0.0:8080
+    routes:
+      - name: bench
+        rules:
+          - filters:
+              - type: ResponseHeaderModifier
+                set: [{ name: x-config-mark, value: "RELOAD_MARK" }]
+            backends: [{ cluster: app }]
+
+clusters:
+  - name: app
+    lb_policy: round_robin
+    health_check:
+      interval: 1s
+      timeout: 500ms
+      unhealthy_threshold: 2
+      healthy_threshold: 2
+      http: { path: /healthz }
+    endpoints:
+      - address: 127.0.0.1:9001
+      - address: 127.0.0.1:9002
+      - address: 127.0.0.1:9003

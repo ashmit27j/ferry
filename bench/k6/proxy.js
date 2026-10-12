@@ -26,8 +26,10 @@ export const options = {
       rate: RATE,
       timeUnit: '1s',
       duration: DURATION,
-      preAllocatedVUs: Math.max(50, Math.ceil(RATE / 50)),
-      maxVUs: Math.max(200, Math.ceil(RATE / 10)),
+      // Pre-allocate generously: allocating VUs mid-run makes k6 itself drop
+      // iterations, even against a bare backend.
+      preAllocatedVUs: Math.max(100, Math.ceil(RATE / 10)),
+      maxVUs: Math.max(400, Math.ceil(RATE / 2)),
     },
   },
   thresholds: {
