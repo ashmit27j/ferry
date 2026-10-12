@@ -43,6 +43,10 @@ path = "it/breakers.rs"
 name = "outliers"
 path = "it/outliers.rs"
 
+[[test]]
+name = "ratelimit"
+path = "it/ratelimit.rs"
+
 [dependencies]
 bytes.workspace = true
 ferry-config.workspace = true

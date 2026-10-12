@@ -66,6 +66,8 @@ pub struct RequestInfo<'a> {
 pub struct Decision<'a> {
     /// Name of the matched route.
     pub route: &'a str,
+    /// Index of the matched route in the listener's routes.
+    pub route_index: usize,
     /// Index of the matched rule within the route.
     pub rule_index: usize,
     /// The matched rule.
@@ -184,6 +186,7 @@ impl Router {
                 .map(ferry_config::WeightedBackend::cluster);
             Some(Decision {
                 route: compiled.route.name(),
+                route_index: c.route,
                 rule_index: c.rule,
                 rule,
                 matched,

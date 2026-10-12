@@ -35,6 +35,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::body::UpstreamBody;
+use crate::ratelimit::RateLimiter;
 use crate::router::Router;
 
 /// Everything a request needs, frozen at one snapshot version.
@@ -53,6 +54,8 @@ pub(crate) struct Runtime {
 pub(crate) struct ListenerRuntime {
     pub(crate) config: Listener,
     pub(crate) router: Arc<Router>,
+    /// Parallel to `config.routes()`; `None` for routes without a rate limit.
+    pub(crate) rate_limiters: Vec<Option<Arc<RateLimiter>>>,
 }
 
 /// One cluster's balancer and pools.
@@ -149,11 +152,33 @@ impl Control {
                 // Settings changed; keep the router (and its counters) if the
                 // routes did not.
                 let router = old
+                    .as_ref()
                     .filter(|o| o.config.routes() == listener.routes())
                     .map_or_else(|| Arc::new(Router::new(listener)), |o| Arc::clone(&o.router));
+                // Keep a route's buckets when its limit is unchanged.
+                let rate_limiters = listener
+                    .routes()
+                    .iter()
+                    .map(|route| {
+                        let limit = route.rate_limit()?;
+                        let kept = old.as_ref().and_then(|o| {
+                            o.config
+                                .routes()
+                                .iter()
+                                .zip(&o.rate_limiters)
+                                .find(|(r, l)| {
+                                    r.name() == route.name()
+                                        && l.as_ref().is_some_and(|l| l.config() == limit)
+                                })
+                                .and_then(|(_, l)| l.clone())
+                        });
+                        Some(kept.unwrap_or_else(|| Arc::new(RateLimiter::new(limit))))
+                    })
+                    .collect();
                 Some(Arc::new(ListenerRuntime {
                     config: listener.clone(),
                     router,
+                    rate_limiters,
                 }))
             })
             .collect();

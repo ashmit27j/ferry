@@ -64,6 +64,8 @@ pub(crate) struct Downstream {
 pub const REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 static X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
 static X_FORWARDED_PROTO: HeaderName = HeaderName::from_static("x-forwarded-proto");
+/// Set on replies refused by a route's rate limit, like Envoy's `x-envoy-ratelimited`.
+pub const RATE_LIMITED: HeaderName = HeaderName::from_static("x-ferry-ratelimited");
 /// Set on replies refused by a circuit breaker, like Envoy's `x-envoy-overloaded`.
 pub const OVERLOADED: HeaderName = HeaderName::from_static("x-ferry-overloaded");
 /// Longest client-supplied request ID kept.
@@ -108,6 +110,22 @@ async fn proxy(runtime: &Runtime, from: Downstream, req: Request<Incoming>) -> R
         return fail(StatusCode::NOT_FOUND, "no route");
     };
     let rule = decision.rule;
+
+    if let Some(limiter) = listener
+        .rate_limiters
+        .get(decision.route_index)
+        .and_then(Option::as_ref)
+        && let Err(limited) = limiter.check(from.peer.ip(), req.headers())
+    {
+        let mut resp = fail(StatusCode::TOO_MANY_REQUESTS, "rate limited");
+        let secs =
+            limited.retry_after.as_secs() + u64::from(limited.retry_after.subsec_nanos() > 0);
+        resp.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(secs.max(1)));
+        resp.headers_mut()
+            .insert(RATE_LIMITED, HeaderValue::from_static("true"));
+        return resp;
+    }
 
     if let Some(redirect) = rule.redirect() {
         let host_only = normalize_host(host);

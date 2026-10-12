@@ -17,6 +17,7 @@ mod error;
 mod forward;
 mod grpc;
 pub mod proxy_protocol;
+mod ratelimit;
 pub mod router;
 mod server;
 mod state;
