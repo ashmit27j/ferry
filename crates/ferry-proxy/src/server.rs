@@ -2,14 +2,13 @@
 
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use ferry_config::{Snapshot, SnapshotVersion};
+use ferry_lb::pool::{PoolSet, PoolSettings};
 use hyper::service::service_fn;
-use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use hyper_util::server::graceful::GracefulShutdown;
@@ -18,9 +17,10 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::body::UpstreamBody;
 use crate::error::ProxyError;
-use crate::forward::{UpstreamClient, handle};
-use crate::state::Runtime;
+use crate::forward::{Downstream, handle};
+use crate::state::{BoundListener, Control, HealthSink, Runtime};
 
 /// How long a draining proxy waits for in-flight requests before closing connections.
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -28,14 +28,57 @@ pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// Time allowed for a client to send complete request headers.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Idle upstream connections are closed after this long.
-const UPSTREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+/// How often idle upstream connections are swept.
+const POOL_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
 
-/// Shared between listeners and the reload handle.
+/// Shared between listeners, the reload handle and health checkers.
 #[derive(Debug)]
 struct Shared {
     runtime: ArcSwap<Runtime>,
-    client: UpstreamClient,
+    /// Serialises reloads with health-driven host-set rebuilds.
+    control: Mutex<Control>,
+    pools: PoolSet<UpstreamBody>,
+    bound: Vec<BoundListener>,
+}
+
+impl Shared {
+    fn control(&self) -> std::sync::MutexGuard<'_, Control> {
+        self.control.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Builds and publishes a runtime for `snapshot` under the control lock.
+    fn install(self: &Arc<Self>, snapshot: Snapshot) {
+        let weak = Arc::downgrade(self);
+        let mut control = self.control();
+        let prev = self.runtime.load_full();
+        let next = control.build(snapshot, Some(&prev), &self.bound, &self.pools, &weak);
+        self.runtime.store(Arc::new(next));
+    }
+
+    /// Rebuilds every cluster's host set from current health.
+    fn refresh_all(&self) {
+        let _control = self.control();
+        for c in &self.runtime.load().clusters {
+            c.balancer.refresh();
+        }
+    }
+}
+
+impl HealthSink for Shared {
+    fn health_changed(&self, cluster: &str) {
+        let _control = self.control();
+        let runtime = self.runtime.load();
+        if let Some(c) = runtime.clusters.iter().find(|c| c.config.name() == cluster) {
+            c.balancer.refresh();
+            let set = c.balancer.host_set();
+            info!(
+                cluster,
+                eligible = set.len(),
+                panic = set.is_panic(),
+                "host set rebuilt after health change"
+            );
+        }
+    }
 }
 
 /// A proxy whose listeners are bound but not yet serving.
@@ -52,13 +95,14 @@ pub struct ReloadHandle {
 }
 
 impl Proxy {
-    /// Binds every listener in `snapshot`.
+    /// Binds every listener in `snapshot` and starts its health checkers.
     ///
     /// # Errors
     ///
     /// Returns [`ProxyError::Bind`] if any address cannot be bound.
     pub async fn bind(snapshot: Snapshot) -> Result<Self, ProxyError> {
         let mut listeners = Vec::with_capacity(snapshot.listeners().len());
+        let mut bound = Vec::with_capacity(snapshot.listeners().len());
         for (i, l) in snapshot.listeners().iter().enumerate() {
             let tcp = TcpListener::bind(l.address())
                 .await
@@ -72,21 +116,25 @@ impl Proxy {
             })?;
             info!(listener = l.name(), address = %local, "listening");
             listeners.push((i, local, tcp));
+            bound.push(BoundListener {
+                name: l.name().to_owned(),
+                addr: local,
+            });
         }
-        let mut connector = HttpConnector::new();
-        connector.set_nodelay(true);
-        let client = Client::builder(TokioExecutor::new())
-            .pool_idle_timeout(UPSTREAM_IDLE_TIMEOUT)
-            .pool_timer(TokioTimer::new())
-            .timer(TokioTimer::new())
-            .build(connector);
-        Ok(Self {
-            shared: Arc::new(Shared {
-                runtime: ArcSwap::from_pointee(Runtime::new(snapshot)),
-                client,
-            }),
-            listeners,
-        })
+        let pools = PoolSet::new(PoolSettings::default());
+        let shared = Arc::new_cyclic(|weak: &Weak<Shared>| {
+            let mut control = Control::default();
+            let runtime = control.build(snapshot, None, &bound, &pools, weak);
+            Shared {
+                runtime: ArcSwap::from_pointee(runtime),
+                control: Mutex::new(control),
+                pools,
+                bound,
+            }
+        });
+        // A checker could have flipped an endpoint before `shared` existed.
+        shared.refresh_all();
+        Ok(Self { shared, listeners })
     }
 
     /// Addresses actually bound, in listener order. Useful when a config asks for port 0.
@@ -108,6 +156,7 @@ impl Proxy {
     /// Draining stops accepting, tells HTTP/1.1 clients to close after their
     /// current response and sends HTTP/2 GOAWAY, then waits up to
     /// `drain_timeout` for in-flight requests before dropping what remains.
+    /// Health checkers stop once draining finishes.
     ///
     /// # Errors
     ///
@@ -130,6 +179,7 @@ impl Proxy {
                 drain_timeout,
             ));
         }
+        let sweeper = tokio::spawn(sweep_pools(Arc::downgrade(&self.shared), token.clone()));
         shutdown.await;
         info!(?drain_timeout, "shutdown requested; draining");
         token.cancel();
@@ -138,6 +188,8 @@ impl Proxy {
                 warn!(error = %e, "listener task ended abnormally");
             }
         }
+        let _ = sweeper.await;
+        self.shared.control().shutdown();
         info!("drained");
         Ok(())
     }
@@ -145,11 +197,12 @@ impl Proxy {
 
 impl ReloadHandle {
     /// Atomically replaces the active snapshot. Requests already in flight keep
-    /// the snapshot they started with. Listener addresses are not rebound; a
-    /// changed listener set takes effect on restart.
+    /// the snapshot they started with. Unchanged clusters and routers, endpoint
+    /// health and connection pools carry over. Listener addresses are not
+    /// rebound; a changed listener set takes effect on restart.
     pub fn swap(&self, snapshot: Snapshot) {
         let version = snapshot.version();
-        self.shared.runtime.store(Arc::new(Runtime::new(snapshot)));
+        self.shared.install(snapshot);
         info!(%version, "snapshot swapped");
     }
 
@@ -157,6 +210,37 @@ impl ReloadHandle {
     #[must_use]
     pub fn current_version(&self) -> SnapshotVersion {
         self.shared.runtime.load().snapshot.version()
+    }
+
+    /// Health of every endpoint of `cluster` in the current snapshot, in
+    /// config order, or `None` if there is no such cluster.
+    #[must_use]
+    pub fn endpoint_health(&self, cluster: &str) -> Option<Vec<(SocketAddr, bool)>> {
+        let runtime = self.shared.runtime.load();
+        let c = runtime
+            .clusters
+            .iter()
+            .find(|c| c.config.name() == cluster)?;
+        Some(
+            c.balancer
+                .hosts()
+                .iter()
+                .map(|h| (h.state.address(), h.state.is_healthy()))
+                .collect(),
+        )
+    }
+}
+
+async fn sweep_pools(shared: Weak<Shared>, token: CancellationToken) {
+    loop {
+        tokio::select! {
+            () = token.cancelled() => return,
+            () = tokio::time::sleep(POOL_SWEEP_INTERVAL) => {}
+        }
+        let Some(shared) = shared.upgrade() else {
+            return;
+        };
+        shared.pools.evict_idle();
     }
 }
 
@@ -182,7 +266,8 @@ async fn accept_loop(
             () = token.cancelled() => break,
             accepted = tcp.accept() => match accepted {
                 Ok((stream, peer)) => {
-                    serve(&shared, &builder, &graceful, index, stream, peer);
+                    let from = Downstream { listener: index, port: addr.port(), peer };
+                    serve(&shared, &builder, &graceful, from, stream);
                 }
                 Err(e) => {
                     // Usually fd exhaustion; back off briefly instead of spinning.
@@ -205,23 +290,23 @@ fn serve(
     shared: &Arc<Shared>,
     builder: &auto::Builder<TokioExecutor>,
     graceful: &GracefulShutdown,
-    index: usize,
+    from: Downstream,
     stream: TcpStream,
-    peer: SocketAddr,
 ) {
     if let Err(e) = stream.set_nodelay(true) {
-        debug!(%peer, error = %e, "set_nodelay failed");
+        debug!(peer = %from.peer, error = %e, "set_nodelay failed");
     }
     let svc_shared = Arc::clone(shared);
     let service = service_fn(move |req| {
         // One load per request: the request keeps this snapshot until it completes.
         let runtime = svc_shared.runtime.load_full();
-        handle(runtime, svc_shared.client.clone(), index, req)
+        handle(runtime, from, req)
     });
     let conn = builder
         .serve_connection(TokioIo::new(stream), service)
         .into_owned();
     let conn = graceful.watch(conn);
+    let peer = from.peer;
     tokio::spawn(async move {
         if let Err(e) = conn.await {
             debug!(%peer, error = %e, "connection closed with error");

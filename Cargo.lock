@@ -588,6 +588,7 @@ dependencies = [
  "ferry-config",
  "ferry-lb",
  "ferry-proxy",
+ "http",
 ]
 
 [[package]]
@@ -654,12 +655,14 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "bytes",
+ "fastrand",
  "ferry-config",
  "ferry-lb",
  "http",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "proptest",
  "thiserror",
  "tokio",
  "tokio-util",

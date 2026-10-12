@@ -10,19 +10,21 @@ publish.workspace = true
 
 [dependencies]
 arc-swap.workspace = true
+fastrand.workspace = true
 bytes.workspace = true
 ferry-config.workspace = true
 ferry-lb.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["http1", "http2", "server", "client"] }
-hyper-util = { workspace = true, features = ["tokio", "server-auto", "server-graceful", "client-legacy", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["tokio", "server-auto", "server-graceful", "http1", "http2"] }
 thiserror.workspace = true
-tokio = { workspace = true, features = ["net", "rt", "time", "macros", "sync"] }
+tokio = { workspace = true, features = ["net", "rt", "time", "macros", "sync", "fs"] }
 tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]

@@ -23,6 +23,7 @@ ferry-config.workspace = true
 criterion.workspace = true
 ferry-lb.workspace = true
 ferry-proxy.workspace = true
+http.workspace = true
 
 [lints]
 workspace = true
