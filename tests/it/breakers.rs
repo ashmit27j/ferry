@@ -93,7 +93,9 @@ async fn max_connections_limits_new_upstream_connections() {
         "{results:?}"
     );
     assert!(results.iter().any(|&(s, o)| s == 503 && o), "{results:?}");
-    // The one connection is reused afterwards.
+    // The one connection is reused afterwards, once the task that returns it
+    // to the pool has run.
+    tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(get(proxy.addr, "/").await.status, 200);
 }
 
