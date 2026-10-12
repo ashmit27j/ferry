@@ -14,6 +14,15 @@ pub enum ProxyError {
         #[source]
         source: std::io::Error,
     },
+    /// A cluster's upstream TLS settings could not be loaded.
+    #[error("cluster {cluster}: {source}")]
+    UpstreamTls {
+        /// Cluster name.
+        cluster: String,
+        /// Underlying error.
+        #[source]
+        source: crate::tls::TlsError,
+    },
     /// A listener's certificates could not be loaded.
     #[error("listener {listener}: {source}")]
     Tls {

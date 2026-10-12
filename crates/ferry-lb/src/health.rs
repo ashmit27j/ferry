@@ -22,11 +22,11 @@ use http::{HeaderValue, Method, Request};
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::client::conn::{http1, http2};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::endpoint::EndpointState;
+use crate::pool::{UpstreamTls, dial};
 
 /// `User-Agent` sent with HTTP checks.
 pub const USER_AGENT_VALUE: &str = "ferry-health-check";
@@ -54,7 +54,7 @@ pub enum Probe {
 }
 
 /// Timing and thresholds for one checker.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct HealthSpec {
     /// Time between probes.
     pub interval: Duration,
@@ -66,7 +66,22 @@ pub struct HealthSpec {
     pub healthy_threshold: u32,
     /// The probe.
     pub probe: Probe,
+    /// TLS to the endpoint, when the cluster uses it.
+    pub tls: Option<Arc<UpstreamTls>>,
 }
+
+impl PartialEq for HealthSpec {
+    fn eq(&self, other: &Self) -> bool {
+        self.interval == other.interval
+            && self.timeout == other.timeout
+            && self.unhealthy_threshold == other.unhealthy_threshold
+            && self.healthy_threshold == other.healthy_threshold
+            && self.probe == other.probe
+            && self.tls.as_ref().map(|t| t.id) == other.tls.as_ref().map(|t| t.id)
+    }
+}
+
+impl Eq for HealthSpec {}
 
 /// Called after an endpoint's health changes, to rebuild host sets.
 pub type OnChange = Arc<dyn Fn() + Send + Sync>;
@@ -99,7 +114,7 @@ async fn run(
         }
         let verdict = tokio::select! {
             () = token.cancelled() => return,
-            v = tokio::time::timeout(spec.timeout, probe(addr, &spec.probe)) => {
+            v = tokio::time::timeout(spec.timeout, probe(addr, &spec.probe, spec.tls.as_deref())) => {
                 v.unwrap_or_else(|_| Err("timed out".to_owned()))
             }
         };
@@ -140,11 +155,13 @@ fn jittered(base: Duration, spread: f64) -> Duration {
 }
 
 /// Runs one probe; `Err` carries a short reason for logs.
-pub async fn probe(addr: SocketAddr, probe: &Probe) -> Result<(), String> {
-    let stream = TcpStream::connect(addr)
-        .await
-        .map_err(|e| format!("connect: {e}"))?;
-    let _ = stream.set_nodelay(true);
+pub async fn probe(
+    addr: SocketAddr,
+    probe: &Probe,
+    tls: Option<&UpstreamTls>,
+) -> Result<(), String> {
+    let stream = dial(addr, tls).await.map_err(|e| e.to_string())?;
+    let h2 = stream.negotiated_h2();
     let io = TokioIo::new(stream);
     match probe {
         Probe::Http {
@@ -152,20 +169,33 @@ pub async fn probe(addr: SocketAddr, probe: &Probe) -> Result<(), String> {
             host,
             expected_statuses,
         } => {
-            let (mut sender, conn) = http1::handshake::<_, Empty<Bytes>>(io)
-                .await
-                .map_err(|e| format!("handshake: {e}"))?;
-            tokio::spawn(conn);
-            let req = Request::get(path.as_str())
-                .header(HOST, host.as_str())
-                .header(USER_AGENT, USER_AGENT_VALUE)
-                .header(http::header::CONNECTION, "close")
-                .body(Empty::new())
-                .map_err(|e| format!("request: {e}"))?;
-            let resp = sender
-                .send_request(req)
-                .await
-                .map_err(|e| format!("request: {e}"))?;
+            let resp = if h2 {
+                // TLS negotiated HTTP/2: ask in HTTP/2.
+                let (mut sender, conn) = http2::Builder::new(TokioExecutor::new())
+                    .timer(TokioTimer::new())
+                    .handshake::<_, Empty<Bytes>>(io)
+                    .await
+                    .map_err(|e| format!("handshake: {e}"))?;
+                tokio::spawn(conn);
+                let req = Request::get(format!("https://{host}{path}"))
+                    .header(USER_AGENT, USER_AGENT_VALUE)
+                    .body(Empty::new())
+                    .map_err(|e| format!("request: {e}"))?;
+                sender.send_request(req).await
+            } else {
+                let (mut sender, conn) = http1::handshake::<_, Empty<Bytes>>(io)
+                    .await
+                    .map_err(|e| format!("handshake: {e}"))?;
+                tokio::spawn(conn);
+                let req = Request::get(path.as_str())
+                    .header(HOST, host.as_str())
+                    .header(USER_AGENT, USER_AGENT_VALUE)
+                    .header(http::header::CONNECTION, "close")
+                    .body(Empty::new())
+                    .map_err(|e| format!("request: {e}"))?;
+                sender.send_request(req).await
+            }
+            .map_err(|e| format!("request: {e}"))?;
             let status = resp.status().as_u16();
             if expected_statuses.contains(&status) {
                 Ok(())
@@ -180,9 +210,12 @@ pub async fn probe(addr: SocketAddr, probe: &Probe) -> Result<(), String> {
                 .await
                 .map_err(|e| format!("handshake: {e}"))?;
             tokio::spawn(conn);
+            let scheme = if tls.is_some() { "https" } else { "http" };
             let req = Request::builder()
                 .method(Method::POST)
-                .uri(format!("http://{authority}/grpc.health.v1.Health/Check"))
+                .uri(format!(
+                    "{scheme}://{authority}/grpc.health.v1.Health/Check"
+                ))
                 .header(CONTENT_TYPE, "application/grpc")
                 .header(TE, "trailers")
                 .header(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE))
@@ -333,12 +366,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            probe(mock.addr(), &http_probe(mock_http::HEALTH_PATH)).await,
+            probe(mock.addr(), &http_probe(mock_http::HEALTH_PATH), None).await,
             Ok(())
         );
         mock.set_healthy(false);
         assert!(
-            probe(mock.addr(), &http_probe(mock_http::HEALTH_PATH))
+            probe(mock.addr(), &http_probe(mock_http::HEALTH_PATH), None)
                 .await
                 .is_err()
         );
@@ -353,9 +386,9 @@ mod tests {
             service: String::new(),
             authority: "svc".into(),
         };
-        assert_eq!(probe(mock.addr(), &p).await, Ok(()));
+        assert_eq!(probe(mock.addr(), &p, None).await, Ok(()));
         mock.set_healthy(false);
-        assert!(probe(mock.addr(), &p).await.is_err());
+        assert!(probe(mock.addr(), &p, None).await.is_err());
     }
 
     #[tokio::test]
@@ -373,6 +406,7 @@ mod tests {
             unhealthy_threshold: 2,
             healthy_threshold: 2,
             probe: http_probe(mock_http::HEALTH_PATH),
+            tls: None,
         };
         let task = spawn(
             spec,

@@ -366,7 +366,12 @@ impl UpstreamRequest {
                                 Authority::try_from(h.state.address().to_string()).ok()
                             })
                         });
-                let mut b = Uri::builder().scheme(Scheme::HTTP);
+                let scheme = if cluster.tls.is_some() {
+                    Scheme::HTTPS
+                } else {
+                    Scheme::HTTP
+                };
+                let mut b = Uri::builder().scheme(scheme);
                 if let Some(a) = authority {
                     b = b.authority(a);
                 }

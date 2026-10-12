@@ -27,7 +27,7 @@ use ferry_config::{
     UpstreamProtocol,
 };
 use ferry_lb::health::{self, HealthSpec, Probe};
-use ferry_lb::pool::{Pool, PoolKey, PoolSet, Protocol};
+use ferry_lb::pool::{Pool, PoolKey, PoolSet, Protocol, UpstreamTls};
 use ferry_lb::{
     CircuitBreakers, ClusterBalancer, EndpointState, Host, OutlierConfig, Policy, RetryBudget,
 };
@@ -38,7 +38,7 @@ use crate::body::UpstreamBody;
 use crate::error::ProxyError;
 use crate::ratelimit::RateLimiter;
 use crate::router::Router;
-use crate::tls::ServerTls;
+use crate::tls::{ServerTls, upstream_tls};
 
 /// Everything a request needs, frozen at one snapshot version.
 #[derive(Debug)]
@@ -62,10 +62,67 @@ pub(crate) struct ListenerRuntime {
     pub(crate) tls: Option<Arc<ServerTls>>,
 }
 
+/// Builds the TLS client configuration of every cluster that uses upstream
+/// TLS, reusing the previous runtime's when a cluster's TLS settings and
+/// protocol are unchanged. Side-effect free, like [`prepare_tls`].
+fn prepare_upstream_tls(
+    snapshot: &Snapshot,
+    prev: Option<&Runtime>,
+) -> Result<HashMap<String, Arc<UpstreamTls>>, ProxyError> {
+    let mut out = HashMap::new();
+    for c in snapshot.clusters() {
+        let Some(cfg) = c.tls() else { continue };
+        let reused = prev.and_then(|p| {
+            p.clusters
+                .iter()
+                .find(|old| {
+                    old.config.name() == c.name()
+                        && old.config.tls() == Some(cfg)
+                        && old.config.protocol() == c.protocol()
+                })
+                .and_then(|old| old.tls.clone())
+        });
+        let tls = match reused {
+            Some(t) => t,
+            None => Arc::new(upstream_tls(cfg, c.protocol()).map_err(|source| {
+                ProxyError::UpstreamTls {
+                    cluster: c.name().to_owned(),
+                    source,
+                }
+            })?),
+        };
+        out.insert(c.name().to_owned(), tls);
+    }
+    Ok(out)
+}
+
+/// Everything about a snapshot that can fail to load (certificates, CAs),
+/// loaded before any runtime state is touched.
+#[derive(Debug, Default)]
+pub(crate) struct Prepared {
+    /// Per bound listener, in bind order.
+    pub(crate) listener_tls: Vec<Option<Arc<ServerTls>>>,
+    /// Per cluster name.
+    pub(crate) upstream_tls: HashMap<String, Arc<UpstreamTls>>,
+}
+
+/// Loads every certificate and CA `snapshot` needs. Side-effect free: an error
+/// leaves the running proxy untouched.
+pub(crate) fn prepare(
+    snapshot: &Snapshot,
+    prev: Option<&Runtime>,
+    bound: &[BoundListener],
+) -> Result<Prepared, ProxyError> {
+    Ok(Prepared {
+        listener_tls: prepare_tls(snapshot, prev, bound)?,
+        upstream_tls: prepare_upstream_tls(snapshot, prev)?,
+    })
+}
+
 /// Loads the certificates of every bound TLS listener in `snapshot`, reusing
 /// the previous runtime's state when a listener's TLS settings are unchanged.
 /// Side-effect free, so a failure leaves the running proxy untouched.
-pub(crate) fn prepare_tls(
+fn prepare_tls(
     snapshot: &Snapshot,
     prev: Option<&Runtime>,
     bound: &[BoundListener],
@@ -103,6 +160,8 @@ pub(crate) struct ClusterRuntime {
     pub(crate) pools: Vec<Arc<Pool<UpstreamBody>>>,
     pub(crate) budget: RetryBudget,
     pub(crate) breakers: CircuitBreakers,
+    /// TLS to the endpoints, when configured.
+    pub(crate) tls: Option<Arc<UpstreamTls>>,
 }
 
 impl Runtime {
@@ -141,8 +200,10 @@ impl Control {
         bound: &[BoundListener],
         pools: &PoolSet<UpstreamBody>,
         sink: &Weak<S>,
-        tls: &[Option<Arc<ServerTls>>],
+        prepared: &Prepared,
     ) -> Runtime {
+        let tls = &prepared.listener_tls;
+        let upstream_tls = &prepared.upstream_tls;
         let mut used_endpoints = HashSet::new();
         let mut used_pools: HashSet<PoolKey> = HashSet::new();
         let mut desired_checks: HashMap<(String, SocketAddr), HealthSpec> = HashMap::new();
@@ -151,11 +212,15 @@ impl Control {
             .clusters()
             .iter()
             .map(|c| {
+                let tls = upstream_tls.get(c.name());
                 for e in c.endpoints() {
                     used_endpoints.insert((c.name().to_owned(), e.address()));
-                    used_pools.insert((e.address(), protocol(c.protocol())));
+                    used_pools.insert((e.address(), protocol(c.protocol()), tls.map(|t| t.id)));
                     if let Some(hc) = c.health_check() {
-                        desired_checks.insert((c.name().to_owned(), e.address()), health_spec(hc));
+                        desired_checks.insert(
+                            (c.name().to_owned(), e.address()),
+                            health_spec(hc, tls.cloned()),
+                        );
                     }
                 }
                 let reused = prev.and_then(|p| {
@@ -165,7 +230,7 @@ impl Control {
                 });
                 match reused {
                     Some(old) => Arc::clone(old),
-                    None => Arc::new(self.cluster_runtime(c, pools)),
+                    None => Arc::new(self.cluster_runtime(c, pools, tls.cloned())),
                 }
             })
             .collect();
@@ -257,7 +322,12 @@ impl Control {
         )
     }
 
-    fn cluster_runtime(&mut self, c: &Cluster, pools: &PoolSet<UpstreamBody>) -> ClusterRuntime {
+    fn cluster_runtime(
+        &mut self,
+        c: &Cluster,
+        pools: &PoolSet<UpstreamBody>,
+        tls: Option<Arc<UpstreamTls>>,
+    ) -> ClusterRuntime {
         let hosts: Vec<Host> = c
             .endpoints()
             .iter()
@@ -277,11 +347,12 @@ impl Control {
         let pools = c
             .endpoints()
             .iter()
-            .map(|e| pools.get(e.address(), protocol(c.protocol())))
+            .map(|e| pools.get(e.address(), protocol(c.protocol()), tls.as_ref()))
             .collect();
         let b = c.retry_budget();
         let cb = c.circuit_breakers();
         ClusterRuntime {
+            tls,
             breakers: CircuitBreakers::new(
                 cb.max_connections(),
                 cb.max_pending_requests(),
@@ -392,7 +463,7 @@ fn policy(p: LbPolicy) -> Policy {
     }
 }
 
-fn health_spec(hc: &HealthCheck) -> HealthSpec {
+fn health_spec(hc: &HealthCheck, tls: Option<Arc<UpstreamTls>>) -> HealthSpec {
     let probe = match hc.kind() {
         HealthCheckKind::Grpc { service, authority } => Probe::Grpc {
             service: service.clone(),
@@ -421,6 +492,7 @@ fn health_spec(hc: &HealthCheck) -> HealthSpec {
         unhealthy_threshold: hc.unhealthy_threshold(),
         healthy_threshold: hc.healthy_threshold(),
         probe,
+        tls,
     }
 }
 
@@ -515,9 +587,23 @@ clusters:
         let pools = PoolSet::new(PoolSettings::default());
         let sink: Weak<NoSink> = Weak::new();
         let mut control = Control::default();
-        let first = control.build(snap(BASE), None, &bound(), &pools, &sink, &[]);
+        let first = control.build(
+            snap(BASE),
+            None,
+            &bound(),
+            &pools,
+            &sink,
+            &Prepared::default(),
+        );
         let changed = BASE.replace("10.0.0.3:80", "10.0.0.4:80");
-        let second = control.build(snap(&changed), Some(&first), &bound(), &pools, &sink, &[]);
+        let second = control.build(
+            snap(&changed),
+            Some(&first),
+            &bound(),
+            &pools,
+            &sink,
+            &Prepared::default(),
+        );
         assert!(Arc::ptr_eq(&first.clusters[0], &second.clusters[0]));
         assert!(!Arc::ptr_eq(&first.clusters[1], &second.clusters[1]));
         assert!(Arc::ptr_eq(
@@ -533,12 +619,26 @@ clusters:
         let pools = PoolSet::new(PoolSettings::default());
         let sink: Weak<NoSink> = Weak::new();
         let mut control = Control::default();
-        let first = control.build(snap(BASE), None, &bound(), &pools, &sink, &[]);
+        let first = control.build(
+            snap(BASE),
+            None,
+            &bound(),
+            &pools,
+            &sink,
+            &Prepared::default(),
+        );
         let limited = BASE.replace(
             "address: 127.0.0.1:0,",
             "address: 127.0.0.1:0, limits: { max_request_headers: 10 },",
         );
-        let second = control.build(snap(&limited), Some(&first), &bound(), &pools, &sink, &[]);
+        let second = control.build(
+            snap(&limited),
+            Some(&first),
+            &bound(),
+            &pools,
+            &sink,
+            &Prepared::default(),
+        );
         let (a, b) = (
             first.listeners[0].as_ref().unwrap(),
             second.listeners[0].as_ref().unwrap(),
@@ -553,13 +653,27 @@ clusters:
         let pools = PoolSet::new(PoolSettings::default());
         let sink: Weak<NoSink> = Weak::new();
         let mut control = Control::default();
-        let first = control.build(snap(BASE), None, &bound(), &pools, &sink, &[]);
+        let first = control.build(
+            snap(BASE),
+            None,
+            &bound(),
+            &pools,
+            &sink,
+            &Prepared::default(),
+        );
         let guard = first.clusters[0].balancer.hosts()[0].state.start_request();
         let changed = BASE.replace(
             "{ address: 10.0.0.2:80 }",
             "{ address: 10.0.0.2:80, weight: 2 }",
         );
-        let second = control.build(snap(&changed), Some(&first), &bound(), &pools, &sink, &[]);
+        let second = control.build(
+            snap(&changed),
+            Some(&first),
+            &bound(),
+            &pools,
+            &sink,
+            &Prepared::default(),
+        );
         assert!(!Arc::ptr_eq(&first.clusters[0], &second.clusters[0]));
         assert_eq!(
             second.clusters[0].balancer.hosts()[0]
@@ -585,9 +699,23 @@ clusters:
             "{ name: a, endpoints",
             "{ name: a, health_check: { interval: 1h, http: { path: /healthz } }, endpoints",
         );
-        let first = control.build(snap(&with_hc), None, &bound(), &pools, &sink, &[]);
+        let first = control.build(
+            snap(&with_hc),
+            None,
+            &bound(),
+            &pools,
+            &sink,
+            &Prepared::default(),
+        );
         assert_eq!(control.checker_count(), 2);
-        let second = control.build(snap(BASE), Some(&first), &bound(), &pools, &sink, &[]);
+        let second = control.build(
+            snap(BASE),
+            Some(&first),
+            &bound(),
+            &pools,
+            &sink,
+            &Prepared::default(),
+        );
         assert_eq!(control.checker_count(), 0);
         drop(second);
         control.shutdown();
@@ -603,7 +731,7 @@ clusters:
             name: "gone".into(),
             addr: "127.0.0.1:2".parse().unwrap(),
         });
-        let rt = control.build(snap(BASE), None, &b, &pools, &sink, &[]);
+        let rt = control.build(snap(BASE), None, &b, &pools, &sink, &Prepared::default());
         assert!(rt.listeners[0].is_some());
         assert!(rt.listeners[1].is_none());
     }

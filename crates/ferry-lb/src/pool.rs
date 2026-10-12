@@ -17,8 +17,10 @@
 use std::collections::{HashMap, HashSet};
 use std::error::Error as StdError;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
@@ -27,6 +29,8 @@ use http::{Request, Response};
 use hyper::body::{Body, Incoming};
 use hyper::client::conn::{TrySendError, http1, http2};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use rustls::pki_types::ServerName;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tracing::debug;
 
@@ -83,6 +87,15 @@ pub enum PoolError {
         /// Configured timeout.
         timeout: Duration,
     },
+    /// The TLS handshake with the endpoint failed.
+    #[error("TLS handshake with {addr} failed: {source}")]
+    Tls {
+        /// Endpoint.
+        addr: SocketAddr,
+        /// Underlying error.
+        #[source]
+        source: std::io::Error,
+    },
     /// The cluster's `max_connections` circuit breaker is open.
     #[error("connection limit reached for {addr}")]
     Overflow {
@@ -107,6 +120,7 @@ type BoxError = Box<dyn StdError + Send + Sync>;
 pub struct Pool<B> {
     addr: SocketAddr,
     protocol: Protocol,
+    tls: Option<Arc<UpstreamTls>>,
     settings: PoolSettings,
     idle: SegQueue<Idle<B>>,
     idle_len: AtomicUsize,
@@ -142,10 +156,16 @@ where
 {
     /// An empty pool.
     #[must_use]
-    pub fn new(addr: SocketAddr, protocol: Protocol, settings: PoolSettings) -> Arc<Self> {
+    pub fn new(
+        addr: SocketAddr,
+        protocol: Protocol,
+        tls: Option<Arc<UpstreamTls>>,
+        settings: PoolSettings,
+    ) -> Arc<Self> {
         Arc::new(Self {
             addr,
             protocol,
+            tls,
             settings,
             idle: SegQueue::new(),
             idle_len: AtomicUsize::new(0),
@@ -279,16 +299,14 @@ where
         (!sender.is_closed()).then(|| http2::SendRequest::clone(sender))
     }
 
-    async fn connect(&self, timeout: Duration) -> Result<TokioIo<TcpStream>, PoolError> {
+    /// TCP connect, then the TLS handshake when the pool uses TLS; both
+    /// within `timeout`.
+    async fn connect(&self, timeout: Duration) -> Result<TokioIo<Stream>, PoolError> {
         let addr = self.addr;
-        let stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
+        tokio::time::timeout(timeout, dial(addr, self.tls.as_deref()))
             .await
             .map_err(|_| PoolError::ConnectTimeout { addr, timeout })?
-            .map_err(|source| PoolError::Connect { addr, source })?;
-        if let Err(e) = stream.set_nodelay(true) {
-            debug!(%addr, error = %e, "set_nodelay failed");
-        }
-        Ok(TokioIo::new(stream))
+            .map(TokioIo::new)
     }
 
     async fn dial_h1(
@@ -381,8 +399,111 @@ where
     }
 }
 
-/// Identifies a pool: endpoint address and wire protocol.
-pub type PoolKey = (SocketAddr, Protocol);
+/// How a pool speaks TLS to its endpoint.
+#[derive(Debug)]
+pub struct UpstreamTls {
+    /// Client configuration (roots, client certificate, ALPN).
+    pub config: Arc<rustls::ClientConfig>,
+    /// Name sent in SNI and verified against the server certificate.
+    pub server_name: ServerName<'static>,
+    /// Fingerprint of the settings; pools with different TLS settings to the
+    /// same endpoint are kept apart.
+    pub id: u64,
+}
+
+/// A plaintext or TLS upstream connection.
+#[derive(Debug)]
+pub(crate) enum Stream {
+    Plain(TcpStream),
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+}
+
+impl Stream {
+    /// True when TLS negotiated `h2` through ALPN.
+    pub(crate) fn negotiated_h2(&self) -> bool {
+        matches!(self, Self::Tls(s) if s.get_ref().1.alpn_protocol() == Some(b"h2"))
+    }
+}
+
+/// Connects to `addr` and, with `tls`, completes the TLS handshake. Shared by
+/// pools and health checks; callers apply their own timeout.
+pub(crate) async fn dial(addr: SocketAddr, tls: Option<&UpstreamTls>) -> Result<Stream, PoolError> {
+    let stream = TcpStream::connect(addr)
+        .await
+        .map_err(|source| PoolError::Connect { addr, source })?;
+    if let Err(e) = stream.set_nodelay(true) {
+        debug!(%addr, error = %e, "set_nodelay failed");
+    }
+    match tls {
+        None => Ok(Stream::Plain(stream)),
+        Some(t) => tokio_rustls::TlsConnector::from(Arc::clone(&t.config))
+            .connect(t.server_name.clone(), stream)
+            .await
+            .map(|s| Stream::Tls(Box::new(s)))
+            .map_err(|source| PoolError::Tls { addr, source }),
+    }
+}
+
+impl AsyncRead for Stream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            Self::Tls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for Stream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            Self::Tls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            Self::Tls(s) => Pin::new(s.as_mut()).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Self::Plain(s) => s.is_write_vectored(),
+            Self::Tls(s) => s.is_write_vectored(),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_flush(cx),
+            Self::Tls(s) => Pin::new(s.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            Self::Tls(s) => Pin::new(s.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
+
+/// Identifies a pool: endpoint address, wire protocol and TLS settings.
+pub type PoolKey = (SocketAddr, Protocol, Option<u64>);
 
 /// Every pool of a proxy, keyed by endpoint and protocol.
 ///
@@ -410,12 +531,17 @@ where
     }
 
     /// The pool for `addr` and `protocol`, created on first use.
-    pub fn get(&self, addr: SocketAddr, protocol: Protocol) -> Arc<Pool<B>> {
+    pub fn get(
+        &self,
+        addr: SocketAddr,
+        protocol: Protocol,
+        tls: Option<&Arc<UpstreamTls>>,
+    ) -> Arc<Pool<B>> {
         let mut pools = self.pools.lock().unwrap_or_else(PoisonError::into_inner);
         Arc::clone(
             pools
-                .entry((addr, protocol))
-                .or_insert_with(|| Pool::new(addr, protocol, self.settings)),
+                .entry((addr, protocol, tls.map(|t| t.id)))
+                .or_insert_with(|| Pool::new(addr, protocol, tls.cloned(), self.settings)),
         )
     }
 
@@ -486,7 +612,8 @@ mod tests {
         let mock = mock_http::spawn("127.0.0.1:0".parse().unwrap(), Behavior::named("a"))
             .await
             .unwrap();
-        let pool: Arc<Pool<B>> = Pool::new(mock.addr(), Protocol::Http1, PoolSettings::default());
+        let pool: Arc<Pool<B>> =
+            Pool::new(mock.addr(), Protocol::Http1, None, PoolSettings::default());
         for i in 0..3 {
             let conn = pool.checkout(T, None).await.unwrap();
             assert_eq!(conn.is_reused(), i > 0, "request {i}");
@@ -509,7 +636,8 @@ mod tests {
         let mock = mock_http::spawn("127.0.0.1:0".parse().unwrap(), Behavior::named("a"))
             .await
             .unwrap();
-        let pool: Arc<Pool<B>> = Pool::new(mock.addr(), Protocol::Http2, PoolSettings::default());
+        let pool: Arc<Pool<B>> =
+            Pool::new(mock.addr(), Protocol::Http2, None, PoolSettings::default());
         let first = pool.checkout(T, None).await.unwrap();
         let second = pool.checkout(T, None).await.unwrap();
         assert!(!first.is_reused());
@@ -528,7 +656,7 @@ mod tests {
             .unwrap()
             .local_addr()
             .unwrap();
-        let pool: Arc<Pool<B>> = Pool::new(dead, Protocol::Http1, PoolSettings::default());
+        let pool: Arc<Pool<B>> = Pool::new(dead, Protocol::Http1, None, PoolSettings::default());
         // Linux refuses at once; Windows retries the SYN for about two seconds,
         // so a short timeout may fire first.
         assert!(matches!(
@@ -543,7 +671,7 @@ mod tests {
             .await
             .unwrap();
         let addr = mock.addr();
-        let pool: Arc<Pool<B>> = Pool::new(addr, Protocol::Http1, PoolSettings::default());
+        let pool: Arc<Pool<B>> = Pool::new(addr, Protocol::Http1, None, PoolSettings::default());
         let resp = pool
             .checkout(T, None)
             .await
@@ -566,7 +694,8 @@ mod tests {
         let mock = mock_http::spawn("127.0.0.1:0".parse().unwrap(), Behavior::named("a"))
             .await
             .unwrap();
-        let pool: Arc<Pool<B>> = Pool::new(mock.addr(), Protocol::Http1, PoolSettings::default());
+        let pool: Arc<Pool<B>> =
+            Pool::new(mock.addr(), Protocol::Http1, None, PoolSettings::default());
         let limit = Limit::new(1);
         let first = pool.checkout(T, Some(&limit)).await.unwrap();
         assert_eq!(limit.active(), 1);
@@ -593,13 +722,13 @@ mod tests {
         let set: PoolSet<B> = PoolSet::new(PoolSettings::default());
         let a: SocketAddr = "10.0.0.1:80".parse().unwrap();
         let b: SocketAddr = "10.0.0.2:80".parse().unwrap();
-        let p1 = set.get(a, Protocol::Http1);
-        assert!(Arc::ptr_eq(&p1, &set.get(a, Protocol::Http1)));
-        set.get(a, Protocol::Http2);
-        set.get(b, Protocol::Http1);
+        let p1 = set.get(a, Protocol::Http1, None);
+        assert!(Arc::ptr_eq(&p1, &set.get(a, Protocol::Http1, None)));
+        set.get(a, Protocol::Http2, None);
+        set.get(b, Protocol::Http1, None);
         assert_eq!(set.len(), 3);
-        set.retain(&HashSet::from([(a, Protocol::Http1)]));
+        set.retain(&HashSet::from([(a, Protocol::Http1, None)]));
         assert_eq!(set.len(), 1);
-        assert!(Arc::ptr_eq(&p1, &set.get(a, Protocol::Http1)));
+        assert!(Arc::ptr_eq(&p1, &set.get(a, Protocol::Http1, None)));
     }
 }

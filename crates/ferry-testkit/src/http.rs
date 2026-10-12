@@ -39,6 +39,29 @@ pub const HEALTH_PATH: &str = "/healthz";
 ///
 /// Fails if `addr` cannot be bound.
 pub async fn spawn(addr: SocketAddr, behavior: Behavior) -> std::io::Result<MockServer> {
+    spawn_inner(addr, behavior, None).await
+}
+
+/// Starts the same echo server behind TLS. The echo gains a `tls` object
+/// with the negotiated ALPN protocol and whether the client sent a
+/// certificate, so tests can check mutual TLS.
+///
+/// # Errors
+///
+/// Fails if `addr` cannot be bound.
+pub async fn spawn_tls(
+    addr: SocketAddr,
+    behavior: Behavior,
+    config: Arc<rustls::ServerConfig>,
+) -> std::io::Result<MockServer> {
+    spawn_inner(addr, behavior, Some(config)).await
+}
+
+async fn spawn_inner(
+    addr: SocketAddr,
+    behavior: Behavior,
+    tls: Option<Arc<rustls::ServerConfig>>,
+) -> std::io::Result<MockServer> {
     let listener = TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
     let stats = Arc::new(Stats::default());
@@ -48,8 +71,16 @@ pub async fn spawn(addr: SocketAddr, behavior: Behavior) -> std::io::Result<Mock
         Arc::new(behavior),
         Arc::clone(&stats),
         token.clone(),
+        tls,
     ));
     Ok(MockServer::new(local, stats, token, task))
+}
+
+/// What the TLS layer saw, reported in the echo.
+#[derive(Debug, Clone)]
+struct TlsInfo {
+    alpn: Option<String>,
+    client_cert: bool,
 }
 
 async fn accept_loop(
@@ -57,6 +88,7 @@ async fn accept_loop(
     behavior: Arc<Behavior>,
     stats: Arc<Stats>,
     token: CancellationToken,
+    tls: Option<Arc<rustls::ServerConfig>>,
 ) {
     let builder = auto::Builder::new(TokioExecutor::new());
     loop {
@@ -70,16 +102,50 @@ async fn accept_loop(
         let _ = stream.set_nodelay(true);
         let behavior = Arc::clone(&behavior);
         let stats = Arc::clone(&stats);
-        let service =
-            service_fn(move |req| respond(req, Arc::clone(&behavior), Arc::clone(&stats)));
-        let conn = builder
-            .serve_connection(TokioIo::new(stream), service)
-            .into_owned();
+        let builder = builder.clone();
         let token = token.clone();
+        let tls = tls.clone();
         tokio::spawn(async move {
+            let serve = async {
+                match tls {
+                    None => {
+                        let service = service_fn(move |req| {
+                            respond(req, Arc::clone(&behavior), Arc::clone(&stats), None)
+                        });
+                        let _ = builder
+                            .serve_connection(TokioIo::new(stream), service)
+                            .await;
+                    }
+                    Some(config) => {
+                        let Ok(stream) =
+                            tokio_rustls::TlsAcceptor::from(config).accept(stream).await
+                        else {
+                            return;
+                        };
+                        let (_, conn) = stream.get_ref();
+                        let info = TlsInfo {
+                            alpn: conn
+                                .alpn_protocol()
+                                .map(|p| String::from_utf8_lossy(p).into_owned()),
+                            client_cert: conn.peer_certificates().is_some_and(|c| !c.is_empty()),
+                        };
+                        let service = service_fn(move |req| {
+                            respond(
+                                req,
+                                Arc::clone(&behavior),
+                                Arc::clone(&stats),
+                                Some(info.clone()),
+                            )
+                        });
+                        let _ = builder
+                            .serve_connection(TokioIo::new(stream), service)
+                            .await;
+                    }
+                }
+            };
             // Cancelling drops the connection, closing the socket mid-flight.
             tokio::select! {
-                _ = conn => {}
+                () = serve => {}
                 () = token.cancelled() => {}
             }
         });
@@ -90,6 +156,7 @@ async fn respond(
     req: Request<Incoming>,
     behavior: Arc<Behavior>,
     stats: Arc<Stats>,
+    tls: Option<TlsInfo>,
 ) -> Result<Response<MockBody>, Infallible> {
     if req.uri().path() == HEALTH_PATH {
         let mut resp = Response::new(MockBody::now(Bytes::from_static(b"ok")));
@@ -141,6 +208,7 @@ async fn respond(
         "version": format!("{:?}", parts.version),
         "headers": headers,
         "body_bytes": body_bytes,
+        "tls": tls.map(|t| serde_json::json!({ "alpn": t.alpn, "client_cert": t.client_cert })),
     });
     let data = Bytes::from(echo.to_string());
     let mut resp = Response::new(match body_delay {

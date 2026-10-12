@@ -17,6 +17,8 @@ http.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["client", "http1", "http2"] }
 hyper-util = { workspace = true, features = ["tokio"] }
+rustls.workspace = true
+tokio-rustls.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "rt", "time", "sync", "macros"] }
 tokio-util.workspace = true

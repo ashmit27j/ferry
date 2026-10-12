@@ -21,7 +21,7 @@ use crate::body::UpstreamBody;
 use crate::error::ProxyError;
 use crate::forward::{Downstream, handle};
 use crate::proxy_protocol;
-use crate::state::{BoundListener, Control, HealthSink, ListenerRuntime, Runtime, prepare_tls};
+use crate::state::{BoundListener, Control, HealthSink, ListenerRuntime, Runtime, prepare};
 use crate::tls::HANDSHAKE_TIMEOUT;
 
 /// How long a draining proxy waits for in-flight requests before closing connections.
@@ -56,8 +56,15 @@ impl Shared {
         let weak = Arc::downgrade(self);
         let mut control = self.control();
         let prev = self.runtime.load_full();
-        let tls = prepare_tls(&snapshot, Some(&prev), &self.bound)?;
-        let next = control.build(snapshot, Some(&prev), &self.bound, &self.pools, &weak, &tls);
+        let prepared = prepare(&snapshot, Some(&prev), &self.bound)?;
+        let next = control.build(
+            snapshot,
+            Some(&prev),
+            &self.bound,
+            &self.pools,
+            &weak,
+            &prepared,
+        );
         self.runtime.store(Arc::new(next));
         Ok(())
     }
@@ -144,10 +151,10 @@ impl Proxy {
             });
         }
         let pools = PoolSet::new(PoolSettings::default());
-        let tls = prepare_tls(&snapshot, None, &bound)?;
+        let prepared = prepare(&snapshot, None, &bound)?;
         let shared = Arc::new_cyclic(|weak: &Weak<Shared>| {
             let mut control = Control::default();
-            let runtime = control.build(snapshot, None, &bound, &pools, weak, &tls);
+            let runtime = control.build(snapshot, None, &bound, &pools, weak, &prepared);
             Shared {
                 runtime: ArcSwap::from_pointee(runtime),
                 control: Mutex::new(control),

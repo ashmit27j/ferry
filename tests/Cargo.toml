@@ -51,6 +51,10 @@ path = "it/ratelimit.rs"
 name = "tls"
 path = "it/tls.rs"
 
+[[test]]
+name = "upstream_tls"
+path = "it/upstream_tls.rs"
+
 [dependencies]
 bytes.workspace = true
 ferry-config.workspace = true

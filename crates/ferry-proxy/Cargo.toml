@@ -12,6 +12,7 @@ publish.workspace = true
 arc-swap.workspace = true
 rustls.workspace = true
 rustls-webpki.workspace = true
+webpki-roots.workspace = true
 tokio-rustls.workspace = true
 fastrand.workspace = true
 bytes.workspace = true

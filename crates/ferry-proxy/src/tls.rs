@@ -13,13 +13,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use ferry_config::{CertificateSource, ListenerTls, TlsVersion};
-use rustls::ServerConfig;
+use ferry_config::{
+    CaSource, CertificateSource, ListenerTls, TlsVersion, UpstreamProtocol,
+    UpstreamTls as UpstreamTlsSettings,
+};
+use ferry_lb::pool::UpstreamTls;
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
+use rustls::{ClientConfig, RootCertStore, ServerConfig};
 
 /// Time allowed for a client to complete the TLS handshake.
 pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -138,6 +142,98 @@ impl ResolvesServerCert for SniResolver {
     fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         self.pick(hello.server_name())
     }
+}
+
+/// Builds the TLS client side of a cluster: trusted roots (configured CAs or
+/// the Mozilla store), an optional client certificate for mTLS, SNI, and ALPN
+/// matching the cluster's protocol.
+pub(crate) fn upstream_tls(
+    cfg: &UpstreamTlsSettings,
+    protocol: UpstreamProtocol,
+) -> Result<UpstreamTls, TlsError> {
+    let provider = provider();
+    let mut hasher = DefaultHasher::new();
+    cfg.sni().hash(&mut hasher);
+    let mut roots = RootCertStore::empty();
+    match cfg.ca() {
+        None => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
+        Some(ca) => {
+            let (pem, what) = match ca {
+                CaSource::File(p) => (
+                    std::fs::read(p).map_err(|source| TlsError::Read {
+                        path: p.display().to_string(),
+                        source,
+                    })?,
+                    p.display().to_string(),
+                ),
+                CaSource::Pem(s) => (s.as_bytes().to_vec(), "inline CA".to_owned()),
+                _ => (Vec::new(), "CA".to_owned()),
+            };
+            pem.hash(&mut hasher);
+            let mut added = 0;
+            for der in CertificateDer::pem_slice_iter(&pem) {
+                let der = der.map_err(|e| TlsError::Pem {
+                    what: what.clone(),
+                    message: format!("bad CA PEM: {e}"),
+                })?;
+                roots.add(der).map_err(|source| TlsError::Rustls {
+                    what: what.clone(),
+                    source,
+                })?;
+                added += 1;
+            }
+            if added == 0 {
+                return Err(TlsError::Pem {
+                    what,
+                    message: "no CA certificate found".into(),
+                });
+            }
+        }
+    }
+    let builder = ClientConfig::builder_with_provider(Arc::clone(&provider))
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .map_err(|source| TlsError::Rustls {
+            what: "upstream TLS".into(),
+            source,
+        })?
+        .with_root_certificates(roots);
+    let mut config = match cfg.client_certificate() {
+        None => builder.with_no_client_auth(),
+        Some(src) => {
+            let (chain, key, what) = read_source(src)?;
+            chain.hash(&mut hasher);
+            key.hash(&mut hasher);
+            // Validates the pair (including that the key matches) first.
+            certified_key(&chain, &key, &what, &provider)?;
+            let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&chain)
+                .collect::<Result<_, _>>()
+                .map_err(|e| TlsError::Pem {
+                    what: what.clone(),
+                    message: format!("bad certificate PEM: {e}"),
+                })?;
+            let key = PrivateKeyDer::from_pem_slice(&key).map_err(|e| TlsError::Pem {
+                what: what.clone(),
+                message: format!("bad private key PEM: {e}"),
+            })?;
+            builder
+                .with_client_auth_cert(certs, key)
+                .map_err(|source| TlsError::Rustls { what, source })?
+        }
+    };
+    config.alpn_protocols = match protocol {
+        UpstreamProtocol::Http2 => vec![b"h2".to_vec()],
+        _ => vec![b"http/1.1".to_vec()],
+    };
+    matches!(protocol, UpstreamProtocol::Http2).hash(&mut hasher);
+    let server_name = ServerName::try_from(cfg.sni().to_owned()).map_err(|e| TlsError::Pem {
+        what: "sni".into(),
+        message: e.to_string(),
+    })?;
+    Ok(UpstreamTls {
+        config: Arc::new(config),
+        server_name,
+        id: hasher.finish(),
+    })
 }
 
 /// One TLS listener's acceptor configuration and certificate state.
