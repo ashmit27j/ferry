@@ -23,6 +23,10 @@ path = "it/proxy_m1.rs"
 name = "security"
 path = "it/security.rs"
 
+[[test]]
+name = "edge"
+path = "it/edge.rs"
+
 [dependencies]
 bytes.workspace = true
 ferry-config.workspace = true

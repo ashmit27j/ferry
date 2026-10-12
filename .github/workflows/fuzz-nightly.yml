@@ -21,6 +21,7 @@ jobs:
       matrix:
         target:
           - config_yaml
+          - proxy_protocol
     steps:
       - uses: actions/checkout@v5
       - run: rustup toolchain install nightly --profile minimal --no-self-update

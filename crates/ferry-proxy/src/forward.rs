@@ -45,9 +45,19 @@ pub(crate) struct Downstream {
     pub(crate) listener: usize,
     /// Port of that listener, for redirects.
     pub(crate) port: u16,
-    /// Client address.
+    /// Client address: from the PROXY header when the listener expects one.
     pub(crate) peer: SocketAddr,
+    /// `http` or `https`, for `X-Forwarded-Proto` and redirects.
+    pub(crate) scheme: &'static str,
 }
+
+/// Request ID header: kept when the client sends a usable one, otherwise
+/// generated; echoed on the response.
+pub const REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
+static X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
+static X_FORWARDED_PROTO: HeaderName = HeaderName::from_static("x-forwarded-proto");
+/// Longest client-supplied request ID kept.
+const MAX_REQUEST_ID_LEN: usize = 128;
 
 /// Handles one downstream request.
 pub(crate) async fn handle(
@@ -90,7 +100,7 @@ async fn proxy(runtime: &Runtime, from: Downstream, req: Request<Incoming>) -> R
     if let Some(redirect) = rule.redirect() {
         let host_only = normalize_host(host);
         let target = RedirectTarget {
-            scheme: "http",
+            scheme: from.scheme,
             host: &host_only,
             listener_port: from.port,
             path: req.uri().path(),
@@ -127,6 +137,7 @@ async fn proxy(runtime: &Runtime, from: Downstream, req: Request<Incoming>) -> R
             .is_ok_and(|s| s.split(',').any(|t| t.trim() == "trailers"))
     });
     strip_hop_by_hop(&mut parts.headers);
+    let request_id = set_edge_headers(&mut parts.headers, from);
     if wants_trailers {
         // The one TE value HTTP/2 allows, and the one gRPC requires.
         parts
@@ -200,7 +211,63 @@ async fn proxy(runtime: &Runtime, from: Downstream, req: Request<Incoming>) -> R
     {
         resp.headers_mut().append(header::SET_COOKIE, cookie);
     }
+    resp.headers_mut().insert(REQUEST_ID, request_id);
     resp
+}
+
+/// Sets `X-Forwarded-For` (client IP appended, as Envoy does at the edge),
+/// `X-Forwarded-Proto` (overwritten) and `X-Request-Id` (kept or generated).
+/// Returns the request ID.
+fn set_edge_headers(headers: &mut HeaderMap, from: Downstream) -> HeaderValue {
+    let ip = from.peer.ip().to_string();
+    let xff = match headers
+        .get_all(&X_FORWARDED_FOR)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .fold(String::new(), |mut acc, v| {
+            if !acc.is_empty() {
+                acc.push_str(", ");
+            }
+            acc.push_str(v);
+            acc
+        }) {
+        prior if prior.is_empty() => ip,
+        prior => format!("{prior}, {ip}"),
+    };
+    if let Ok(v) = HeaderValue::from_str(&xff) {
+        headers.insert(X_FORWARDED_FOR.clone(), v);
+    }
+    headers.insert(
+        X_FORWARDED_PROTO.clone(),
+        HeaderValue::from_static(from.scheme),
+    );
+    let id = headers
+        .get(&REQUEST_ID)
+        .filter(|v| {
+            !v.is_empty()
+                && v.len() <= MAX_REQUEST_ID_LEN
+                && v.as_bytes().iter().all(|b| b.is_ascii_graphic())
+        })
+        .cloned()
+        .unwrap_or_else(new_request_id);
+    headers.insert(REQUEST_ID, id.clone());
+    id
+}
+
+/// A random UUID (version 4).
+fn new_request_id() -> HeaderValue {
+    let n = fastrand::u128(..);
+    let n = (n & !(0xf << 76)) | (0x4 << 76); // version 4
+    let n = (n & !(0x3 << 62)) | (0x2 << 62); // RFC 4122 variant
+    let s = format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        n >> 96,
+        (n >> 80) & 0xffff,
+        (n >> 64) & 0xffff,
+        (n >> 48) & 0xffff,
+        n & 0xffff_ffff_ffff
+    );
+    HeaderValue::from_str(&s).unwrap_or(HeaderValue::from_static("invalid"))
 }
 
 /// A request ready for any endpoint of one cluster, plus what is needed to
@@ -474,6 +541,58 @@ mod tests {
             .body(())
             .unwrap();
         assert_eq!(request_host(&req), Some("h1.example.com"));
+    }
+
+    fn downstream(ip: &str) -> Downstream {
+        Downstream {
+            listener: 0,
+            port: 80,
+            peer: SocketAddr::new(ip.parse().unwrap(), 5000),
+            scheme: "https",
+        }
+    }
+
+    #[test]
+    fn edge_headers_append_xff_and_set_proto() {
+        let mut h = HeaderMap::new();
+        h.append("x-forwarded-for", HeaderValue::from_static("1.1.1.1"));
+        h.append("x-forwarded-for", HeaderValue::from_static("2.2.2.2"));
+        h.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+        set_edge_headers(&mut h, downstream("10.0.0.9"));
+        assert_eq!(h["x-forwarded-for"], "1.1.1.1, 2.2.2.2, 10.0.0.9");
+        assert_eq!(h["x-forwarded-proto"], "https");
+        let mut fresh = HeaderMap::new();
+        set_edge_headers(&mut fresh, downstream("::1"));
+        assert_eq!(fresh["x-forwarded-for"], "::1");
+    }
+
+    #[test]
+    fn request_id_is_kept_or_generated() {
+        let mut h = HeaderMap::new();
+        h.insert("x-request-id", HeaderValue::from_static("abc-123"));
+        assert_eq!(set_edge_headers(&mut h, downstream("1.2.3.4")), "abc-123");
+        let mut bad = HeaderMap::new();
+        bad.insert("x-request-id", HeaderValue::from_static("has space"));
+        let id = set_edge_headers(&mut bad, downstream("1.2.3.4"));
+        assert_ne!(id, "has space");
+        assert_eq!(bad["x-request-id"], id);
+    }
+
+    #[test]
+    fn generated_ids_are_uuid_v4() {
+        for _ in 0..100 {
+            let id = new_request_id();
+            let s = id.to_str().unwrap();
+            assert_eq!(s.len(), 36);
+            let parts: Vec<&str> = s.split('-').collect();
+            assert_eq!(
+                parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+                [8, 4, 4, 4, 12]
+            );
+            assert!(parts[2].starts_with('4'), "{s}");
+            assert!(matches!(&parts[3][..1], "8" | "9" | "a" | "b"), "{s}");
+        }
+        assert_ne!(new_request_id(), new_request_id());
     }
 
     #[test]

@@ -20,6 +20,7 @@ use tracing::{debug, info, warn};
 use crate::body::UpstreamBody;
 use crate::error::ProxyError;
 use crate::forward::{Downstream, handle};
+use crate::proxy_protocol;
 use crate::state::{BoundListener, Control, HealthSink, ListenerRuntime, Runtime};
 
 /// How long a draining proxy waits for in-flight requests before closing connections.
@@ -300,6 +301,8 @@ async fn accept_loop(
                         drop(stream);
                         continue;
                     };
+                    let scheme = if listener.config.tls().is_some() { "https" } else { "http" };
+                    let proxy_protocol = listener.config.proxy_protocol();
                     let builder = match &cached {
                         Some((l, b)) if Arc::ptr_eq(l, &listener) => b,
                         _ => {
@@ -307,8 +310,13 @@ async fn accept_loop(
                             &cached.insert((listener, b)).1
                         }
                     };
-                    let from = Downstream { listener: index, port: addr.port(), peer };
-                    serve(&shared, builder, &graceful, from, stream);
+                    let from = Downstream {
+                        listener: index,
+                        port: addr.port(),
+                        peer,
+                        scheme,
+                    };
+                    serve(&shared, builder, &graceful, from, stream, proxy_protocol);
                 }
                 Err(e) => {
                     // Usually fd exhaustion; back off briefly instead of spinning.
@@ -331,26 +339,36 @@ fn serve(
     shared: &Arc<Shared>,
     builder: &auto::Builder<TokioExecutor>,
     graceful: &GracefulShutdown,
-    from: Downstream,
-    stream: TcpStream,
+    mut from: Downstream,
+    mut stream: TcpStream,
+    proxy_protocol: bool,
 ) {
     if let Err(e) = stream.set_nodelay(true) {
         debug!(peer = %from.peer, error = %e, "set_nodelay failed");
     }
-    let svc_shared = Arc::clone(shared);
-    let service = service_fn(move |req| {
-        // One load per request: the request keeps this snapshot until it completes.
-        let runtime = svc_shared.runtime.load_full();
-        handle(runtime, from, req)
-    });
-    let conn = builder
-        .serve_connection(TokioIo::new(stream), service)
-        .into_owned();
-    let conn = graceful.watch(conn);
-    let peer = from.peer;
+    let shared = Arc::clone(shared);
+    let builder = builder.clone();
+    let watcher = graceful.watcher();
     tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            debug!(%peer, error = %e, "connection closed with error");
+        if proxy_protocol {
+            match proxy_protocol::read_header(&mut stream, from.peer).await {
+                Ok(client) => from.peer = client,
+                Err(e) => {
+                    debug!(peer = %from.peer, error = %e, "rejected connection without a valid PROXY header");
+                    return;
+                }
+            }
+        }
+        let service = service_fn(move |req| {
+            // One load per request: the request keeps this snapshot until it completes.
+            let runtime = shared.runtime.load_full();
+            handle(runtime, from, req)
+        });
+        let conn = builder
+            .serve_connection(TokioIo::new(stream), service)
+            .into_owned();
+        if let Err(e) = watcher.watch(conn).await {
+            debug!(peer = %from.peer, error = %e, "connection closed with error");
         }
     });
 }
