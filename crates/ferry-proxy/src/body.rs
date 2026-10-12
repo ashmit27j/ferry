@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use ferry_lb::RequestGuard;
+use ferry_lb::{Permit, RequestGuard};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{Either, Full};
 use hyper::body::{Body, Frame, Incoming, SizeHint};
@@ -154,14 +154,18 @@ pub(crate) struct Tracked {
     inner: Incoming,
     idle: IdleTimer,
     _guard: RequestGuard,
+    _slot: Permit,
 }
 
 impl Tracked {
-    pub(crate) fn new(inner: Incoming, guard: RequestGuard, idle: Duration) -> Self {
+    /// `slot` is the cluster's `max_requests` circuit-breaker slot, held
+    /// until the response body is done.
+    pub(crate) fn new(inner: Incoming, guard: RequestGuard, slot: Permit, idle: Duration) -> Self {
         Self {
             inner,
             idle: IdleTimer::new(idle),
             _guard: guard,
+            _slot: slot,
         }
     }
 }

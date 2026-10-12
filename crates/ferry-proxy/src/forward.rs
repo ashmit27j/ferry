@@ -29,6 +29,8 @@ use crate::body::{
 use crate::grpc;
 use crate::router::{RequestInfo, normalize_host};
 use crate::state::{ClusterRuntime, Runtime, hash_key, set_cookie};
+use ferry_lb::Permit;
+use ferry_lb::pool::PoolError;
 
 /// Most endpoints one request is sent to.
 pub const MAX_ATTEMPTS: usize = 3;
@@ -62,6 +64,8 @@ pub(crate) struct Downstream {
 pub const REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 static X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
 static X_FORWARDED_PROTO: HeaderName = HeaderName::from_static("x-forwarded-proto");
+/// Set on replies refused by a circuit breaker, like Envoy's `x-envoy-overloaded`.
+pub const OVERLOADED: HeaderName = HeaderName::from_static("x-ferry-overloaded");
 /// Longest client-supplied request ID kept.
 const MAX_REQUEST_ID_LEN: usize = 128;
 
@@ -414,6 +418,8 @@ enum Failure {
     BadRequest,
     #[error("request body: {0}")]
     RequestBody(BoxError),
+    #[error("circuit breaker open")]
+    Overflow,
 }
 
 impl Failure {
@@ -436,8 +442,14 @@ impl Failure {
             Self::RequestBody(_) | Self::BadRequest => (StatusCode::BAD_REQUEST, "bad request"),
             Self::Pool(_) | Self::Send(_) => (StatusCode::BAD_GATEWAY, "upstream unavailable"),
             Self::Timeout => (StatusCode::GATEWAY_TIMEOUT, "upstream request timeout"),
+            Self::Overflow => (StatusCode::SERVICE_UNAVAILABLE, "upstream overloaded"),
         };
-        error_reply(grpc, status, message)
+        let mut resp = error_reply(grpc, status, message);
+        if matches!(self, Self::Overflow) {
+            resp.headers_mut()
+                .insert(OVERLOADED, HeaderValue::from_static("true"));
+        }
+        resp
     }
 }
 
@@ -461,14 +473,31 @@ struct Attempts<'a> {
 }
 
 impl Attempts<'_> {
-    /// Whether a policy retry may follow a result with this status, taking
-    /// one retry from the budget if so.
-    fn policy_allows(&self, status: u16, policy_retries: u32, req: &UpstreamRequest) -> bool {
+    /// Whether a policy retry may follow a result with this status. Takes a
+    /// retry slot from the circuit breaker (once per request) and one retry
+    /// from the budget if so.
+    fn policy_allows(
+        &self,
+        status: u16,
+        policy_retries: u32,
+        req: &UpstreamRequest,
+        retry_slot: &mut Option<Permit>,
+    ) -> bool {
         let Some(p) = self.policy else { return false };
-        p.codes().contains(&status)
-            && policy_retries < p.attempts()
-            && req.replay.is_some()
-            && self.cluster.budget.try_withdraw()
+        if !(p.codes().contains(&status) && policy_retries < p.attempts() && req.replay.is_some()) {
+            return false;
+        }
+        if retry_slot.is_none() {
+            *retry_slot = self.cluster.breakers.retries.try_acquire();
+            if retry_slot.is_none() {
+                debug!(
+                    cluster = self.cluster.config.name(),
+                    "retry circuit breaker open"
+                );
+                return false;
+            }
+        }
+        self.cluster.budget.try_withdraw()
     }
 
     async fn backoff(&self, retry: u32) {
@@ -493,6 +522,7 @@ impl Attempts<'_> {
         let max = (1 + policy_max as usize).clamp(MAX_ATTEMPTS, MAX_TOTAL_ATTEMPTS);
         let mut tried = [usize::MAX; MAX_TOTAL_ATTEMPTS];
         let mut policy_retries = 0u32;
+        let mut retry_slot: Option<Permit> = None;
         let mut last = Failure::NoHealthyUpstream;
         for attempt in 0..max {
             let Some(index) = cluster.balancer.pick(self.hash, &tried[..attempt]) else {
@@ -507,9 +537,23 @@ impl Attempts<'_> {
             ) else {
                 break;
             };
+            let Some(request_slot) = cluster.breakers.requests.try_acquire() else {
+                return Err(Failure::Overflow);
+            };
+            let Some(pending_slot) = cluster.breakers.pending.try_acquire() else {
+                return Err(Failure::Overflow);
+            };
             let guard = host.state.start_request();
-            let conn = match pool.checkout(cluster.config.connect_timeout()).await {
+            let checkout = pool
+                .checkout(
+                    cluster.config.connect_timeout(),
+                    Some(&cluster.breakers.connections),
+                )
+                .await;
+            drop(pending_slot);
+            let conn = match checkout {
                 Ok(c) => c,
+                Err(PoolError::Overflow { .. }) => return Err(Failure::Overflow),
                 Err(e) => {
                     // Nothing was sent: always safe to try elsewhere.
                     guard.observe_failure();
@@ -529,7 +573,12 @@ impl Attempts<'_> {
                 Some(Ok(resp)) => {
                     guard.observe_response();
                     if attempt + 1 < max
-                        && self.policy_allows(resp.status().as_u16(), policy_retries, &req)
+                        && self.policy_allows(
+                            resp.status().as_u16(),
+                            policy_retries,
+                            &req,
+                            &mut retry_slot,
+                        )
                     {
                         policy_retries += 1;
                         debug!(endpoint = %host.state.address(), status = %resp.status(), attempt, "retrying on status");
@@ -541,7 +590,7 @@ impl Attempts<'_> {
                     strip_hop_by_hop(&mut parts.headers);
                     return Ok(Response::from_parts(
                         parts,
-                        Tracked::new(body, guard, self.idle).boxed(),
+                        Tracked::new(body, guard, request_slot, self.idle).boxed(),
                     ));
                 }
                 Some(Err(mut e)) => {
@@ -555,7 +604,9 @@ impl Attempts<'_> {
                     } else if req.replay.as_ref().is_some_and(|r| r.always_safe) {
                         // Reset before response headers on an idempotent,
                         // bodiless request: resend without spending budget.
-                    } else if attempt + 1 < max && self.policy_allows(502, policy_retries, &req) {
+                    } else if attempt + 1 < max
+                        && self.policy_allows(502, policy_retries, &req, &mut retry_slot)
+                    {
                         policy_retries += 1;
                         self.backoff(policy_retries).await;
                     } else {
@@ -566,7 +617,9 @@ impl Attempts<'_> {
                 None => {
                     guard.observe_failure();
                     debug!(endpoint = %host.state.address(), attempt, "upstream attempt timed out");
-                    if attempt + 1 < max && self.policy_allows(504, policy_retries, &req) {
+                    if attempt + 1 < max
+                        && self.policy_allows(504, policy_retries, &req, &mut retry_slot)
+                    {
                         policy_retries += 1;
                         self.backoff(policy_retries).await;
                         last = Failure::Timeout;

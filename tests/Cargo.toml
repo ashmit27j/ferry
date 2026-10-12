@@ -35,6 +35,10 @@ path = "it/timeouts.rs"
 name = "retries"
 path = "it/retries.rs"
 
+[[test]]
+name = "breakers"
+path = "it/breakers.rs"
+
 [dependencies]
 bytes.workspace = true
 ferry-config.workspace = true

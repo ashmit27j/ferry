@@ -30,6 +30,8 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::net::TcpStream;
 use tracing::debug;
 
+use crate::breaker::{Limit, Permit};
+
 /// Wire protocol of a pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -80,6 +82,12 @@ pub enum PoolError {
         addr: SocketAddr,
         /// Configured timeout.
         timeout: Duration,
+    },
+    /// The cluster's `max_connections` circuit breaker is open.
+    #[error("connection limit reached for {addr}")]
+    Overflow {
+        /// Endpoint.
+        addr: SocketAddr,
     },
     /// The HTTP handshake failed.
     #[error("handshake with {addr} failed: {source}")]
@@ -164,22 +172,27 @@ where
         self.idle_len.load(Ordering::Relaxed)
     }
 
-    /// Returns a usable connection, reusing one when possible.
+    /// Returns a usable connection, reusing one when possible. A new
+    /// connection takes a slot from `limit` (the cluster's connection circuit
+    /// breaker) for as long as it stays open.
     ///
     /// # Errors
     ///
-    /// Fails if a new connection is needed and cannot be established within
-    /// `connect_timeout`. The caller's request is never involved.
+    /// Fails if a new connection is needed and `limit` is full, or it cannot
+    /// be established within `connect_timeout`. The caller's request is never
+    /// involved.
     pub async fn checkout(
         self: &Arc<Self>,
         connect_timeout: Duration,
+        limit: Option<&Arc<Limit>>,
     ) -> Result<Connection<B>, PoolError> {
         match self.protocol {
             Protocol::Http1 => {
                 if let Some(sender) = self.pop_idle() {
                     return Ok(self.wrap(Inner::H1(sender), true));
                 }
-                let sender = self.dial_h1(connect_timeout).await?;
+                let permit = self.permit(limit)?;
+                let sender = self.dial_h1(connect_timeout, permit).await?;
                 Ok(self.wrap(Inner::H1(sender), false))
             }
             Protocol::Http2 => {
@@ -191,7 +204,8 @@ where
                 if let Some(sender) = self.live_h2() {
                     return Ok(self.wrap(Inner::H2(sender), true));
                 }
-                let sender = self.dial_h2(connect_timeout).await?;
+                let permit = self.permit(limit)?;
+                let sender = self.dial_h2(connect_timeout, permit).await?;
                 self.h2.store(Some(Arc::new(sender.clone())));
                 Ok(self.wrap(Inner::H2(sender), false))
             }
@@ -211,6 +225,16 @@ where
         }
         if self.h2.load().as_ref().is_some_and(|s| s.is_closed()) {
             self.h2.store(None);
+        }
+    }
+
+    fn permit(&self, limit: Option<&Arc<Limit>>) -> Result<Option<Permit>, PoolError> {
+        match limit {
+            None => Ok(None),
+            Some(l) => l
+                .try_acquire()
+                .map(Some)
+                .ok_or(PoolError::Overflow { addr: self.addr }),
         }
     }
 
@@ -267,7 +291,11 @@ where
         Ok(TokioIo::new(stream))
     }
 
-    async fn dial_h1(&self, timeout: Duration) -> Result<http1::SendRequest<B>, PoolError> {
+    async fn dial_h1(
+        &self,
+        timeout: Duration,
+        permit: Option<Permit>,
+    ) -> Result<http1::SendRequest<B>, PoolError> {
         let io = self.connect(timeout).await?;
         let addr = self.addr;
         let (sender, conn) = http1::Builder::new()
@@ -275,6 +303,8 @@ where
             .await
             .map_err(|source| PoolError::Handshake { addr, source })?;
         tokio::spawn(async move {
+            // The connection slot is held until the connection ends.
+            let _permit = permit;
             if let Err(e) = conn.await {
                 debug!(%addr, error = %e, "upstream http/1.1 connection closed with error");
             }
@@ -282,7 +312,11 @@ where
         Ok(sender)
     }
 
-    async fn dial_h2(&self, timeout: Duration) -> Result<http2::SendRequest<B>, PoolError> {
+    async fn dial_h2(
+        &self,
+        timeout: Duration,
+        permit: Option<Permit>,
+    ) -> Result<http2::SendRequest<B>, PoolError> {
         let io = self.connect(timeout).await?;
         let addr = self.addr;
         let (sender, conn) = http2::Builder::new(TokioExecutor::new())
@@ -293,6 +327,7 @@ where
             .await
             .map_err(|source| PoolError::Handshake { addr, source })?;
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(e) = conn.await {
                 debug!(%addr, error = %e, "upstream h2 connection closed with error");
             }
@@ -453,7 +488,7 @@ mod tests {
             .unwrap();
         let pool: Arc<Pool<B>> = Pool::new(mock.addr(), Protocol::Http1, PoolSettings::default());
         for i in 0..3 {
-            let conn = pool.checkout(T).await.unwrap();
+            let conn = pool.checkout(T, None).await.unwrap();
             assert_eq!(conn.is_reused(), i > 0, "request {i}");
             let resp = conn.send(get(mock.addr(), false)).await.unwrap();
             assert_eq!(resp.status(), 200);
@@ -475,8 +510,8 @@ mod tests {
             .await
             .unwrap();
         let pool: Arc<Pool<B>> = Pool::new(mock.addr(), Protocol::Http2, PoolSettings::default());
-        let first = pool.checkout(T).await.unwrap();
-        let second = pool.checkout(T).await.unwrap();
+        let first = pool.checkout(T, None).await.unwrap();
+        let second = pool.checkout(T, None).await.unwrap();
         assert!(!first.is_reused());
         assert!(second.is_reused());
         let (a, b) = tokio::join!(
@@ -497,7 +532,7 @@ mod tests {
         // Linux refuses at once; Windows retries the SYN for about two seconds,
         // so a short timeout may fire first.
         assert!(matches!(
-            pool.checkout(Duration::from_millis(500)).await,
+            pool.checkout(Duration::from_millis(500), None).await,
             Err(PoolError::Connect { .. } | PoolError::ConnectTimeout { .. })
         ));
     }
@@ -510,7 +545,7 @@ mod tests {
         let addr = mock.addr();
         let pool: Arc<Pool<B>> = Pool::new(addr, Protocol::Http1, PoolSettings::default());
         let resp = pool
-            .checkout(T)
+            .checkout(T, None)
             .await
             .unwrap()
             .send(get(addr, false))
@@ -522,8 +557,35 @@ mod tests {
         mock.kill().await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         // The idle connection is closed, so checkout must dial (and fail).
-        assert!(pool.checkout(T).await.is_err());
+        assert!(pool.checkout(T, None).await.is_err());
         assert_eq!(pool.idle_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn connection_limit_blocks_new_connections_only() {
+        let mock = mock_http::spawn("127.0.0.1:0".parse().unwrap(), Behavior::named("a"))
+            .await
+            .unwrap();
+        let pool: Arc<Pool<B>> = Pool::new(mock.addr(), Protocol::Http1, PoolSettings::default());
+        let limit = Limit::new(1);
+        let first = pool.checkout(T, Some(&limit)).await.unwrap();
+        assert_eq!(limit.active(), 1);
+        assert!(matches!(
+            pool.checkout(T, Some(&limit)).await,
+            Err(PoolError::Overflow { .. })
+        ));
+        // Once the first connection is back in the pool it can be reused
+        // without a new slot.
+        let resp = first.send(get(mock.addr(), false)).await.unwrap();
+        resp.into_body().collect().await.unwrap();
+        for _ in 0..50 {
+            if pool.idle_count() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(pool.checkout(T, Some(&limit)).await.unwrap().is_reused());
+        assert_eq!(limit.active(), 1);
     }
 
     #[test]

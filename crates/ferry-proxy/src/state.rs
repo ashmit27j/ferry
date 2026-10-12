@@ -28,7 +28,7 @@ use ferry_config::{
 };
 use ferry_lb::health::{self, HealthSpec, Probe};
 use ferry_lb::pool::{Pool, PoolKey, PoolSet, Protocol};
-use ferry_lb::{ClusterBalancer, EndpointState, Host, Policy, RetryBudget};
+use ferry_lb::{CircuitBreakers, ClusterBalancer, EndpointState, Host, Policy, RetryBudget};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -61,6 +61,7 @@ pub(crate) struct ClusterRuntime {
     /// Parallel to `balancer.hosts()`.
     pub(crate) pools: Vec<Arc<Pool<UpstreamBody>>>,
     pub(crate) budget: RetryBudget,
+    pub(crate) breakers: CircuitBreakers,
 }
 
 impl Runtime {
@@ -206,7 +207,14 @@ impl Control {
             .map(|e| pools.get(e.address(), protocol(c.protocol())))
             .collect();
         let b = c.retry_budget();
+        let cb = c.circuit_breakers();
         ClusterRuntime {
+            breakers: CircuitBreakers::new(
+                cb.max_connections(),
+                cb.max_pending_requests(),
+                cb.max_requests(),
+                cb.max_retries(),
+            ),
             budget: RetryBudget::new(b.budget_percent(), b.min_retries_per_second(), b.ttl()),
             config: c.clone(),
             balancer: ClusterBalancer::new(

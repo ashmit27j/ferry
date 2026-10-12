@@ -13,6 +13,7 @@
 //! Every pick is lock-free and allocation-free; anything that allocates
 //! (rebuilding a host set or a Maglev table) runs off the hot path.
 
+mod breaker;
 mod budget;
 mod cluster;
 mod endpoint;
@@ -22,6 +23,7 @@ pub mod pool;
 mod round_robin;
 mod weighted;
 
+pub use breaker::{CircuitBreakers, Limit, Permit};
 pub use budget::RetryBudget;
 pub use cluster::{ClusterBalancer, Host, HostSet, Policy};
 pub use endpoint::{DEFAULT_RTT, EWMA_DECAY, EndpointState, FAILURE_PENALTY, RequestGuard};
