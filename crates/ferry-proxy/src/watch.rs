@@ -77,11 +77,16 @@ impl FileWatcher {
             .and_then(|text| ferry_config::from_yaml_str(&text))
             .and_then(|config| Ok(config.into_snapshot(version)?));
         match parsed {
-            Ok(snapshot) => {
-                self.reload.swap(snapshot);
-                info!(config = %self.path.display(), %version, "config reloaded");
-                Poll::Reloaded(version)
-            }
+            Ok(snapshot) => match self.reload.swap(snapshot) {
+                Ok(()) => {
+                    info!(config = %self.path.display(), %version, "config reloaded");
+                    Poll::Reloaded(version)
+                }
+                Err(e) => {
+                    error!(config = %self.path.display(), error = %e, "config rejected; keeping current snapshot");
+                    Poll::Rejected(e.to_string())
+                }
+            },
             Err(e) => {
                 error!(config = %self.path.display(), error = %e, "config rejected; keeping current snapshot");
                 Poll::Rejected(e.to_string())

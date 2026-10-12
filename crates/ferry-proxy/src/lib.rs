@@ -21,6 +21,7 @@ mod ratelimit;
 pub mod router;
 mod server;
 mod state;
+pub mod tls;
 pub mod watch;
 
 pub use body::ProxyBody;

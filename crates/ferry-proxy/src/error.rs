@@ -14,4 +14,13 @@ pub enum ProxyError {
         #[source]
         source: std::io::Error,
     },
+    /// A listener's certificates could not be loaded.
+    #[error("listener {listener}: {source}")]
+    Tls {
+        /// Listener name.
+        listener: String,
+        /// Underlying error.
+        #[source]
+        source: crate::tls::TlsError,
+    },
 }

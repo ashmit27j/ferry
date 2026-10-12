@@ -21,10 +21,14 @@ use crate::body::UpstreamBody;
 use crate::error::ProxyError;
 use crate::forward::{Downstream, handle};
 use crate::proxy_protocol;
-use crate::state::{BoundListener, Control, HealthSink, ListenerRuntime, Runtime};
+use crate::state::{BoundListener, Control, HealthSink, ListenerRuntime, Runtime, prepare_tls};
+use crate::tls::HANDSHAKE_TIMEOUT;
 
 /// How long a draining proxy waits for in-flight requests before closing connections.
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often certificate files of TLS listeners are re-read.
+const CERT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How often expired outlier ejections are ended.
 const EJECTION_SWEEP_INTERVAL: Duration = Duration::from_millis(500);
@@ -48,12 +52,29 @@ impl Shared {
     }
 
     /// Builds and publishes a runtime for `snapshot` under the control lock.
-    fn install(self: &Arc<Self>, snapshot: Snapshot) {
+    fn install(self: &Arc<Self>, snapshot: Snapshot) -> Result<(), ProxyError> {
         let weak = Arc::downgrade(self);
         let mut control = self.control();
         let prev = self.runtime.load_full();
-        let next = control.build(snapshot, Some(&prev), &self.bound, &self.pools, &weak);
+        let tls = prepare_tls(&snapshot, Some(&prev), &self.bound)?;
+        let next = control.build(snapshot, Some(&prev), &self.bound, &self.pools, &weak, &tls);
         self.runtime.store(Arc::new(next));
+        Ok(())
+    }
+
+    /// Re-reads certificate files of TLS listeners and swaps in any that
+    /// changed. A failed read keeps the old certificates.
+    fn reload_certificates(&self) {
+        for l in self.runtime.load().listeners.iter().flatten() {
+            if let Some(tls) = &l.tls {
+                match tls.reload_if_changed() {
+                    Ok(true) => info!(listener = l.config.name(), "certificates reloaded"),
+                    Ok(false) => {}
+                    Err(e) => warn!(listener = l.config.name(), error = %e,
+                        "cannot reload certificates; keeping the current ones"),
+                }
+            }
+        }
     }
 
     /// Rebuilds every cluster's host set from current health.
@@ -123,9 +144,10 @@ impl Proxy {
             });
         }
         let pools = PoolSet::new(PoolSettings::default());
+        let tls = prepare_tls(&snapshot, None, &bound)?;
         let shared = Arc::new_cyclic(|weak: &Weak<Shared>| {
             let mut control = Control::default();
-            let runtime = control.build(snapshot, None, &bound, &pools, weak);
+            let runtime = control.build(snapshot, None, &bound, &pools, weak, &tls);
             Shared {
                 runtime: ArcSwap::from_pointee(runtime),
                 control: Mutex::new(control),
@@ -201,10 +223,16 @@ impl ReloadHandle {
     /// the snapshot they started with. Unchanged clusters and routers, endpoint
     /// health and connection pools carry over. Listener addresses are not
     /// rebound; a changed listener set takes effect on restart.
-    pub fn swap(&self, snapshot: Snapshot) {
+    ///
+    /// # Errors
+    ///
+    /// Fails, leaving the current snapshot serving, if a TLS listener's
+    /// certificates cannot be loaded.
+    pub fn swap(&self, snapshot: Snapshot) -> Result<(), ProxyError> {
         let version = snapshot.version();
-        self.shared.install(snapshot);
+        self.shared.install(snapshot)?;
         info!(%version, "snapshot swapped");
+        Ok(())
     }
 
     /// Version of the snapshot currently serving new requests.
@@ -237,6 +265,7 @@ impl ReloadHandle {
 /// [`POOL_SWEEP_INTERVAL`].
 async fn maintenance(shared: Weak<Shared>, token: CancellationToken) {
     let mut last_pool_sweep = tokio::time::Instant::now();
+    let mut last_cert_check = tokio::time::Instant::now();
     loop {
         tokio::select! {
             () = token.cancelled() => return,
@@ -247,6 +276,10 @@ async fn maintenance(shared: Weak<Shared>, token: CancellationToken) {
         };
         for c in &shared.runtime.load().clusters {
             c.balancer.sweep_ejections();
+        }
+        if last_cert_check.elapsed() >= CERT_CHECK_INTERVAL {
+            shared.reload_certificates();
+            last_cert_check = tokio::time::Instant::now();
         }
         if last_pool_sweep.elapsed() >= POOL_SWEEP_INTERVAL {
             shared.pools.evict_idle();
@@ -316,6 +349,7 @@ async fn accept_loop(
                     };
                     let scheme = if listener.config.tls().is_some() { "https" } else { "http" };
                     let proxy_protocol = listener.config.proxy_protocol();
+                    let tls = listener.tls.as_ref().map(|t| Arc::clone(&t.config));
                     let builder = match &cached {
                         Some((l, b)) if Arc::ptr_eq(l, &listener) => b,
                         _ => {
@@ -329,7 +363,8 @@ async fn accept_loop(
                         peer,
                         scheme,
                     };
-                    serve(&shared, builder, &graceful, from, stream, proxy_protocol);
+                    let accepted = Accepted { from, proxy_protocol, tls };
+                    serve(&shared, builder, &graceful, accepted, stream);
                 }
                 Err(e) => {
                     // Usually fd exhaustion; back off briefly instead of spinning.
@@ -348,14 +383,25 @@ async fn accept_loop(
     }
 }
 
+/// Per-connection settings fixed at accept time.
+struct Accepted {
+    from: Downstream,
+    proxy_protocol: bool,
+    tls: Option<Arc<rustls::ServerConfig>>,
+}
+
 fn serve(
     shared: &Arc<Shared>,
     builder: &auto::Builder<TokioExecutor>,
     graceful: &GracefulShutdown,
-    mut from: Downstream,
+    accepted: Accepted,
     mut stream: TcpStream,
-    proxy_protocol: bool,
 ) {
+    let Accepted {
+        mut from,
+        proxy_protocol,
+        tls,
+    } = accepted;
     if let Err(e) = stream.set_nodelay(true) {
         debug!(peer = %from.peer, error = %e, "set_nodelay failed");
     }
@@ -363,6 +409,7 @@ fn serve(
     let builder = builder.clone();
     let watcher = graceful.watcher();
     tokio::spawn(async move {
+        // PROXY header first (the NLB sends it before anything else), then TLS.
         if proxy_protocol {
             match proxy_protocol::read_header(&mut stream, from.peer).await {
                 Ok(client) => from.peer = client,
@@ -377,10 +424,30 @@ fn serve(
             let runtime = shared.runtime.load_full();
             handle(runtime, from, req)
         });
-        let conn = builder
-            .serve_connection(TokioIo::new(stream), service)
-            .into_owned();
-        if let Err(e) = watcher.watch(conn).await {
+        let result = match tls {
+            None => {
+                let conn = builder.serve_connection(TokioIo::new(stream), service);
+                watcher.watch(conn.into_owned()).await
+            }
+            Some(config) => {
+                let acceptor = tokio_rustls::TlsAcceptor::from(config);
+                let tls_stream =
+                    match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+                        Ok(Ok(s)) => s,
+                        Ok(Err(e)) => {
+                            debug!(peer = %from.peer, error = %e, "TLS handshake failed");
+                            return;
+                        }
+                        Err(_) => {
+                            debug!(peer = %from.peer, "TLS handshake timed out");
+                            return;
+                        }
+                    };
+                let conn = builder.serve_connection(TokioIo::new(tls_stream), service);
+                watcher.watch(conn.into_owned()).await
+            }
+        };
+        if let Err(e) = result {
             debug!(peer = %from.peer, error = %e, "connection closed with error");
         }
     });

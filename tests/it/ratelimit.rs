@@ -83,20 +83,26 @@ async fn buckets_survive_reloads_that_keep_the_limit() {
     assert_eq!(get(proxy.addr, "/").await.status, 429);
 
     // Unrelated change: the bucket is kept.
-    proxy.reload.swap(snapshot(
-        &yaml(b.addr(), limit, "    connect_timeout: 2s"),
-        2,
-    ));
+    proxy
+        .reload
+        .swap(snapshot(
+            &yaml(b.addr(), limit, "    connect_timeout: 2s"),
+            2,
+        ))
+        .unwrap();
     assert_eq!(get(proxy.addr, "/").await.status, 429);
 
     // A new limit starts fresh buckets.
-    proxy.reload.swap(snapshot(
-        &yaml(
-            b.addr(),
-            "{ requests: 2, per: 1m }",
-            "    connect_timeout: 2s",
-        ),
-        3,
-    ));
+    proxy
+        .reload
+        .swap(snapshot(
+            &yaml(
+                b.addr(),
+                "{ requests: 2, per: 1m }",
+                "    connect_timeout: 2s",
+            ),
+            3,
+        ))
+        .unwrap();
     assert_eq!(get(proxy.addr, "/").await.status, 200);
 }

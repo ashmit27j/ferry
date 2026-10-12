@@ -10,6 +10,9 @@ publish.workspace = true
 
 [dependencies]
 arc-swap.workspace = true
+rustls.workspace = true
+rustls-webpki.workspace = true
+tokio-rustls.workspace = true
 fastrand.workspace = true
 bytes.workspace = true
 ferry-config.workspace = true
@@ -24,6 +27,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+rcgen.workspace = true
 proptest.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 

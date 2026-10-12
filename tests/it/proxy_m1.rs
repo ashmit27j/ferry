@@ -484,10 +484,12 @@ async fn reloading_under_load_drops_nothing() {
                 .map(|(_, a)| (*a, 1))
                 .collect();
             let policy = policies[(i % 4) as usize];
-            reload.swap(snapshot(
-                &cluster_yaml(&format!("    lb_policy: {policy}"), &eps),
-                i + 2,
-            ));
+            reload
+                .swap(snapshot(
+                    &cluster_yaml(&format!("    lb_policy: {policy}"), &eps),
+                    i + 2,
+                ))
+                .unwrap();
         }
     })
     .await;

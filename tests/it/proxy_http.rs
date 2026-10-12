@@ -189,7 +189,8 @@ async fn hot_swap_routes_new_requests_to_new_snapshot() {
 
     proxy
         .reload
-        .swap(snapshot(&single_cluster_yaml(&[b.addr()]), 2));
+        .swap(snapshot(&single_cluster_yaml(&[b.addr()]), 2))
+        .unwrap();
     assert_eq!(proxy.reload.current_version(), SnapshotVersion(2));
     assert_eq!(get(proxy.addr, "/").await.backend(), "b");
 }
@@ -208,7 +209,8 @@ async fn in_flight_request_finishes_on_its_original_snapshot() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     proxy
         .reload
-        .swap(snapshot(&single_cluster_yaml(&[new.addr()]), 2));
+        .swap(snapshot(&single_cluster_yaml(&[new.addr()]), 2))
+        .unwrap();
 
     assert_eq!(get(proxy.addr, "/").await.backend(), "new");
     let reply = in_flight.await.unwrap();
