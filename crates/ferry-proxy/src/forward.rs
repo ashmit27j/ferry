@@ -20,7 +20,7 @@ use http_body_util::{BodyExt, Either, Empty, Full};
 use hyper::body::{Body, Incoming};
 use tracing::{debug, warn};
 
-use crate::body::{ProxyBody, Tracked, UpstreamBody};
+use crate::body::{ProxyBody, RequestBody, Tracked, UpstreamBody, is_body_too_large};
 use crate::router::{RequestInfo, normalize_host};
 use crate::state::{ClusterRuntime, Runtime, hash_key, set_cookie};
 
@@ -59,9 +59,20 @@ pub(crate) async fn handle(
 }
 
 async fn proxy(runtime: &Runtime, from: Downstream, req: Request<Incoming>) -> Response<ProxyBody> {
-    let Some(router) = runtime.routers.get(from.listener).and_then(Option::as_ref) else {
+    let Some(listener) = runtime
+        .listeners
+        .get(from.listener)
+        .and_then(Option::as_ref)
+    else {
         return local_reply(StatusCode::SERVICE_UNAVAILABLE, "listener removed");
     };
+    let router = &listener.router;
+    let body_limit = listener.config.limits().max_request_body_bytes();
+    if let Some(limit) = body_limit
+        && content_length(req.headers()).is_some_and(|len| len > limit)
+    {
+        return local_reply(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
+    }
     let host = request_host(&req).unwrap_or_default();
     let info = RequestInfo {
         host,
@@ -156,6 +167,7 @@ async fn proxy(runtime: &Runtime, from: Downstream, req: Request<Incoming>) -> R
     }
 
     let (hash, new_cookie) = hash_key(cluster.config.hash_policy(), &parts.headers, from.peer);
+    let body = RequestBody::new(body, body_limit);
     let upstream = match UpstreamRequest::new(parts, path_and_query, cluster, body) {
         Ok(u) => u,
         Err(e) => {
@@ -203,7 +215,7 @@ impl UpstreamRequest {
         mut parts: http::request::Parts,
         path_and_query: PathAndQuery,
         cluster: &ClusterRuntime,
-        body: Incoming,
+        body: RequestBody,
     ) -> Result<Self, http::Error> {
         parts.uri = match cluster.config.protocol() {
             UpstreamProtocol::Http2 => {
@@ -272,6 +284,9 @@ impl Failure {
         match self {
             Self::NoHealthyUpstream => {
                 local_reply(StatusCode::SERVICE_UNAVAILABLE, "no healthy upstream")
+            }
+            Self::Send(e) if is_body_too_large(&e) => {
+                local_reply(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
             }
             Self::Pool(_) | Self::Send(_) => {
                 local_reply(StatusCode::BAD_GATEWAY, "upstream unavailable")
@@ -358,6 +373,16 @@ fn rewrite_path(
         None => path,
     };
     PathAndQuery::try_from(full).ok()
+}
+
+/// The declared `Content-Length`, if present and valid.
+fn content_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
 }
 
 /// The request's host: the `Host` header, or the URI authority for HTTP/2.

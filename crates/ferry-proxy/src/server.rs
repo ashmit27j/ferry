@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use ferry_config::{Snapshot, SnapshotVersion};
+use ferry_config::{Listener, Snapshot, SnapshotVersion};
 use ferry_lb::pool::{PoolSet, PoolSettings};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
@@ -20,13 +20,10 @@ use tracing::{debug, info, warn};
 use crate::body::UpstreamBody;
 use crate::error::ProxyError;
 use crate::forward::{Downstream, handle};
-use crate::state::{BoundListener, Control, HealthSink, Runtime};
+use crate::state::{BoundListener, Control, HealthSink, ListenerRuntime, Runtime};
 
 /// How long a draining proxy waits for in-flight requests before closing connections.
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Time allowed for a client to send complete request headers.
-const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How often idle upstream connections are swept.
 const POOL_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
@@ -244,6 +241,42 @@ async fn sweep_pools(shared: Weak<Shared>, token: CancellationToken) {
     }
 }
 
+/// HTTP/2 flow-control windows recommended by Envoy for edge proxies.
+const H2_STREAM_WINDOW: u32 = 64 * 1024;
+const H2_CONNECTION_WINDOW: u32 = 1024 * 1024;
+/// Streams a client may open and reset before we see them, after which the
+/// connection is closed with ENHANCE_YOUR_CALM (HTTP/2 Rapid Reset, CVE-2023-44487).
+const H2_MAX_PENDING_RESETS: usize = 20;
+/// Streams we may reset because of client protocol errors before closing the
+/// connection ("MadeYouReset", CVE-2025-8671).
+const H2_MAX_LOCAL_ERROR_RESETS: usize = 1024;
+
+/// A connection builder applying a listener's limits and timeouts (ADR 0016).
+fn connection_builder(listener: &Listener) -> auto::Builder<TokioExecutor> {
+    let limits = listener.limits();
+    let timeouts = listener.timeouts();
+    let header_bytes = limits.max_request_headers_bytes();
+    let mut b = auto::Builder::new(TokioExecutor::new());
+    b.http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(timeouts.header_read())
+        .keep_alive(true)
+        // hyper refuses buffers under 8 KiB; validation enforces the floor too.
+        .max_buf_size(header_bytes.max(8 * 1024))
+        .max_headers(limits.max_request_headers());
+    b.http2()
+        .timer(TokioTimer::new())
+        .max_concurrent_streams(limits.h2_max_concurrent_streams())
+        .max_header_list_size(u32::try_from(header_bytes).unwrap_or(u32::MAX))
+        .max_pending_accept_reset_streams(H2_MAX_PENDING_RESETS)
+        .max_local_error_reset_streams(H2_MAX_LOCAL_ERROR_RESETS)
+        .initial_stream_window_size(H2_STREAM_WINDOW)
+        .initial_connection_window_size(H2_CONNECTION_WINDOW)
+        .keep_alive_interval(timeouts.h2_keep_alive())
+        .keep_alive_timeout(timeouts.h2_keep_alive());
+    b
+}
+
 async fn accept_loop(
     shared: Arc<Shared>,
     index: usize,
@@ -253,21 +286,29 @@ async fn accept_loop(
     drain_timeout: Duration,
 ) {
     let graceful = GracefulShutdown::new();
-    let mut builder = auto::Builder::new(TokioExecutor::new());
-    builder
-        .http1()
-        .timer(TokioTimer::new())
-        .header_read_timeout(HEADER_READ_TIMEOUT)
-        .keep_alive(true);
-    builder.http2().timer(TokioTimer::new());
+    // Rebuilt only when a reload changes this listener's settings.
+    let mut cached: Option<(Arc<ListenerRuntime>, auto::Builder<TokioExecutor>)> = None;
 
     loop {
         tokio::select! {
             () = token.cancelled() => break,
             accepted = tcp.accept() => match accepted {
                 Ok((stream, peer)) => {
+                    let runtime = shared.runtime.load();
+                    let Some(listener) = runtime.listeners.get(index).cloned().flatten() else {
+                        // Removed from the config: refuse until restart.
+                        drop(stream);
+                        continue;
+                    };
+                    let builder = match &cached {
+                        Some((l, b)) if Arc::ptr_eq(l, &listener) => b,
+                        _ => {
+                            let b = connection_builder(&listener.config);
+                            &cached.insert((listener, b)).1
+                        }
+                    };
                     let from = Downstream { listener: index, port: addr.port(), peer };
-                    serve(&shared, &builder, &graceful, from, stream);
+                    serve(&shared, builder, &graceful, from, stream);
                 }
                 Err(e) => {
                     // Usually fd exhaustion; back off briefly instead of spinning.

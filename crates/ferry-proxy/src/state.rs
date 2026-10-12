@@ -23,7 +23,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
 
 use ferry_config::{
-    Cluster, ClusterId, HashPolicy, HealthCheck, HealthCheckKind, LbPolicy, Snapshot,
+    Cluster, ClusterId, HashPolicy, HealthCheck, HealthCheckKind, LbPolicy, Listener, Snapshot,
     UpstreamProtocol,
 };
 use ferry_lb::health::{self, HealthSpec, Probe};
@@ -41,9 +41,16 @@ pub(crate) struct Runtime {
     pub(crate) snapshot: Arc<Snapshot>,
     /// One entry per bound listener, in bind order. `None` when the listener
     /// is no longer in the snapshot.
-    pub(crate) routers: Vec<Option<Arc<Router>>>,
+    pub(crate) listeners: Vec<Option<Arc<ListenerRuntime>>>,
     /// One entry per cluster, parallel to `snapshot.clusters()`.
     pub(crate) clusters: Vec<Arc<ClusterRuntime>>,
+}
+
+/// One bound listener's settings and route table.
+#[derive(Debug)]
+pub(crate) struct ListenerRuntime {
+    pub(crate) config: Listener,
+    pub(crate) router: Arc<Router>,
 }
 
 /// One cluster's balancer and pools.
@@ -119,9 +126,10 @@ impl Control {
             })
             .collect();
 
-        let routers = bound
+        let listeners = bound
             .iter()
-            .map(|b| {
+            .enumerate()
+            .map(|(i, b)| {
                 let Some(listener) = snapshot.listener(&b.name) else {
                     warn!(listener = %b.name, "listener removed from config; it now answers 503 until restart");
                     return None;
@@ -130,14 +138,19 @@ impl Control {
                     warn!(listener = %b.name, bound = %b.addr, configured = %listener.address(),
                         "listener address changed; the new address takes effect on restart");
                 }
-                let reused = prev.and_then(|p| {
-                    let i = bound.iter().position(|x| x.name == b.name)?;
-                    let old_listener = p.snapshot.listener(&b.name)?;
-                    (old_listener.routes() == listener.routes())
-                        .then(|| p.routers.get(i).cloned().flatten())
-                        .flatten()
-                });
-                Some(reused.unwrap_or_else(|| Arc::new(Router::new(listener))))
+                let old = prev.and_then(|p| p.listeners.get(i).cloned().flatten());
+                if let Some(old) = old.as_ref().filter(|o| o.config == *listener) {
+                    return Some(Arc::clone(old));
+                }
+                // Settings changed; keep the router (and its counters) if the
+                // routes did not.
+                let router = old
+                    .filter(|o| o.config.routes() == listener.routes())
+                    .map_or_else(|| Arc::new(Router::new(listener)), |o| Arc::clone(&o.router));
+                Some(Arc::new(ListenerRuntime {
+                    config: listener.clone(),
+                    router,
+                }))
             })
             .collect();
 
@@ -156,7 +169,7 @@ impl Control {
 
         Runtime {
             snapshot: Arc::new(snapshot),
-            routers,
+            listeners,
             clusters,
         }
     }
@@ -412,11 +425,31 @@ clusters:
         assert!(Arc::ptr_eq(&first.clusters[0], &second.clusters[0]));
         assert!(!Arc::ptr_eq(&first.clusters[1], &second.clusters[1]));
         assert!(Arc::ptr_eq(
-            first.routers[0].as_ref().unwrap(),
-            second.routers[0].as_ref().unwrap()
+            first.listeners[0].as_ref().unwrap(),
+            second.listeners[0].as_ref().unwrap()
         ));
         // Pools for the dropped endpoint are forgotten.
         assert_eq!(pools.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn listener_setting_change_keeps_the_router() {
+        let pools = PoolSet::new(PoolSettings::default());
+        let sink: Weak<NoSink> = Weak::new();
+        let mut control = Control::default();
+        let first = control.build(snap(BASE), None, &bound(), &pools, &sink);
+        let limited = BASE.replace(
+            "address: 127.0.0.1:0,",
+            "address: 127.0.0.1:0, limits: { max_request_headers: 10 },",
+        );
+        let second = control.build(snap(&limited), Some(&first), &bound(), &pools, &sink);
+        let (a, b) = (
+            first.listeners[0].as_ref().unwrap(),
+            second.listeners[0].as_ref().unwrap(),
+        );
+        assert!(!Arc::ptr_eq(a, b));
+        assert!(Arc::ptr_eq(&a.router, &b.router));
+        assert_eq!(b.config.limits().max_request_headers(), 10);
     }
 
     #[tokio::test]
@@ -475,8 +508,8 @@ clusters:
             addr: "127.0.0.1:2".parse().unwrap(),
         });
         let rt = control.build(snap(BASE), None, &b, &pools, &sink);
-        assert!(rt.routers[0].is_some());
-        assert!(rt.routers[1].is_none());
+        assert!(rt.listeners[0].is_some());
+        assert!(rt.listeners[1].is_none());
     }
 
     #[test]
