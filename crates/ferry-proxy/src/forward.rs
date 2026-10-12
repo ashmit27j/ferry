@@ -10,6 +10,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use ferry_config::{Filter, PathMatch, RedirectTarget, UpstreamProtocol};
@@ -20,7 +21,10 @@ use http_body_util::{BodyExt, Either, Empty, Full};
 use hyper::body::{Body, Incoming};
 use tracing::{debug, warn};
 
-use crate::body::{ProxyBody, RequestBody, Tracked, UpstreamBody, is_body_too_large};
+use crate::body::{
+    BodyTooLarge, IdleTimeout, ProxyBody, RequestBody, Tracked, UpstreamBody, caused_by,
+};
+use crate::grpc;
 use crate::router::{RequestInfo, normalize_host};
 use crate::state::{ClusterRuntime, Runtime, hash_key, set_cookie};
 
@@ -69,19 +73,21 @@ pub(crate) async fn handle(
 }
 
 async fn proxy(runtime: &Runtime, from: Downstream, req: Request<Incoming>) -> Response<ProxyBody> {
+    let grpc = grpc::is_grpc(req.headers());
+    let fail = |status, message| error_reply(grpc, status, message);
     let Some(listener) = runtime
         .listeners
         .get(from.listener)
         .and_then(Option::as_ref)
     else {
-        return local_reply(StatusCode::SERVICE_UNAVAILABLE, "listener removed");
+        return fail(StatusCode::SERVICE_UNAVAILABLE, "listener removed");
     };
     let router = &listener.router;
     let body_limit = listener.config.limits().max_request_body_bytes();
     if let Some(limit) = body_limit
         && content_length(req.headers()).is_some_and(|len| len > limit)
     {
-        return local_reply(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
+        return fail(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
     }
     let host = request_host(&req).unwrap_or_default();
     let info = RequestInfo {
@@ -93,7 +99,7 @@ async fn proxy(runtime: &Runtime, from: Downstream, req: Request<Incoming>) -> R
     };
     let Some(decision) = router.route(&info) else {
         debug!(host, path = req.uri().path(), "no route");
-        return local_reply(StatusCode::NOT_FOUND, "no route");
+        return fail(StatusCode::NOT_FOUND, "no route");
     };
     let rule = decision.rule;
 
@@ -119,13 +125,13 @@ async fn proxy(runtime: &Runtime, from: Downstream, req: Request<Incoming>) -> R
     }
 
     let Some(cluster_id) = decision.cluster else {
-        return local_reply(
+        return fail(
             StatusCode::INTERNAL_SERVER_ERROR,
             "all backends have zero weight",
         );
     };
     let Some(cluster) = runtime.cluster(cluster_id) else {
-        return local_reply(StatusCode::INTERNAL_SERVER_ERROR, "unknown cluster");
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, "unknown cluster");
     };
     let route_name = decision.route;
     let matched_path = decision.matched.path();
@@ -169,7 +175,7 @@ async fn proxy(runtime: &Runtime, from: Downstream, req: Request<Incoming>) -> R
                 if let Some(p) = rw.path() {
                     match rewrite_path(&path_and_query, p, matched_path) {
                         Some(pq) => path_and_query = pq,
-                        None => return local_reply(StatusCode::BAD_REQUEST, "bad rewritten path"),
+                        None => return fail(StatusCode::BAD_REQUEST, "bad rewritten path"),
                     }
                 }
             }
@@ -177,17 +183,39 @@ async fn proxy(runtime: &Runtime, from: Downstream, req: Request<Incoming>) -> R
         }
     }
 
+    let timeouts = rule.timeouts();
+    // The client's gRPC deadline caps the route's request timeout.
+    let deadline = match (
+        timeouts.request(),
+        grpc.then(|| grpc::deadline(&parts.headers)).flatten(),
+    ) {
+        (Some(route), Some(client)) => Some(route.min(client)),
+        (route, client) => route.or(client),
+    };
     let (hash, new_cookie) = hash_key(cluster.config.hash_policy(), &parts.headers, from.peer);
-    let body = RequestBody::new(body, body_limit);
+    let body = RequestBody::new(body, body_limit, timeouts.idle());
     let upstream = match UpstreamRequest::new(parts, path_and_query, cluster, body) {
         Ok(u) => u,
         Err(e) => {
             warn!(error = %e, "cannot build upstream request");
-            return local_reply(StatusCode::BAD_REQUEST, "bad request");
+            return fail(StatusCode::BAD_REQUEST, "bad request");
         }
     };
 
-    let mut resp = match send_with_retries(cluster, upstream, hash).await {
+    let attempts = send_with_retries(
+        cluster,
+        upstream,
+        hash,
+        timeouts.backend_request(),
+        timeouts.idle(),
+    );
+    let result = match deadline {
+        Some(d) => tokio::time::timeout(d, attempts)
+            .await
+            .unwrap_or(Err(Failure::Timeout)),
+        None => attempts.await,
+    };
+    let mut resp = match result {
         Ok(r) => r,
         Err(failure) => {
             warn!(
@@ -196,7 +224,7 @@ async fn proxy(runtime: &Runtime, from: Downstream, req: Request<Incoming>) -> R
                 error = %failure,
                 "upstream request failed",
             );
-            return failure.into_response();
+            return failure.into_response(grpc);
         }
     };
     for filter in filters {
@@ -344,21 +372,35 @@ enum Failure {
     Pool(#[from] ferry_lb::pool::PoolError),
     #[error("{0}")]
     Send(hyper::Error),
+    #[error("upstream request timeout")]
+    Timeout,
 }
 
 impl Failure {
-    fn into_response(self) -> Response<ProxyBody> {
-        match self {
-            Self::NoHealthyUpstream => {
-                local_reply(StatusCode::SERVICE_UNAVAILABLE, "no healthy upstream")
+    fn into_response(self, grpc: bool) -> Response<ProxyBody> {
+        let (status, message) = match self {
+            Self::NoHealthyUpstream => (StatusCode::SERVICE_UNAVAILABLE, "no healthy upstream"),
+            Self::Send(e) if caused_by::<BodyTooLarge>(&e) => {
+                (StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
             }
-            Self::Send(e) if is_body_too_large(&e) => {
-                local_reply(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+            // The client stopped sending its body (Envoy also answers 408).
+            Self::Send(e) if caused_by::<IdleTimeout>(&e) => {
+                (StatusCode::REQUEST_TIMEOUT, "request body timeout")
             }
-            Self::Pool(_) | Self::Send(_) => {
-                local_reply(StatusCode::BAD_GATEWAY, "upstream unavailable")
-            }
-        }
+            Self::Pool(_) | Self::Send(_) => (StatusCode::BAD_GATEWAY, "upstream unavailable"),
+            Self::Timeout => (StatusCode::GATEWAY_TIMEOUT, "upstream request timeout"),
+        };
+        error_reply(grpc, status, message)
+    }
+}
+
+/// A local error reply: plain text, or a trailers-only gRPC response for gRPC
+/// requests so clients see a proper status.
+fn error_reply(grpc: bool, status: StatusCode, message: &'static str) -> Response<ProxyBody> {
+    if grpc {
+        grpc::reply(grpc::code_for(status), message)
+    } else {
+        local_reply(status, message)
     }
 }
 
@@ -366,6 +408,8 @@ async fn send_with_retries(
     cluster: &ClusterRuntime,
     mut req: UpstreamRequest,
     hash: Option<u64>,
+    per_try: Option<Duration>,
+    idle: Duration,
 ) -> Result<Response<ProxyBody>, Failure> {
     let mut tried = [usize::MAX; MAX_ATTEMPTS];
     let mut last = Failure::NoHealthyUpstream;
@@ -395,14 +439,25 @@ async fn send_with_retries(
         let Some(request) = req.pending.take().or_else(|| req.replay()) else {
             break;
         };
-        match conn.send(request).await {
+        let sent = match per_try {
+            Some(t) => match tokio::time::timeout(t, conn.send(request)).await {
+                Ok(r) => r,
+                Err(_) => {
+                    guard.observe_failure();
+                    debug!(endpoint = %host.state.address(), attempt, "upstream attempt timed out");
+                    return Err(Failure::Timeout);
+                }
+            },
+            None => conn.send(request).await,
+        };
+        match sent {
             Ok(resp) => {
                 guard.observe_response();
                 let (mut parts, body) = resp.into_parts();
                 strip_hop_by_hop(&mut parts.headers);
                 return Ok(Response::from_parts(
                     parts,
-                    Tracked::new(body, guard).boxed(),
+                    Tracked::new(body, guard, idle).boxed(),
                 ));
             }
             Err(mut e) => {

@@ -15,6 +15,7 @@
 mod body;
 mod error;
 mod forward;
+mod grpc;
 pub mod proxy_protocol;
 pub mod router;
 mod server;

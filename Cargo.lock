@@ -624,6 +624,7 @@ dependencies = [
  "http",
  "http-body-util",
  "hyper-util",
+ "prost",
  "serde_json",
  "tempfile",
  "tokio",

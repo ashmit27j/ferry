@@ -3,17 +3,20 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
 use http::{HeaderValue, Request, Response, StatusCode};
-use http_body_util::{BodyExt, Full};
-use hyper::body::Incoming;
+use http_body_util::BodyExt;
+use hyper::body::{Body, Frame, Incoming, SizeHint};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use tokio::net::TcpListener;
+use tokio::time::Sleep;
 use tokio_util::sync::CancellationToken;
 
 use crate::{Behavior, MockServer, Stats};
@@ -22,6 +25,9 @@ use crate::{Behavior, MockServer, Stats};
 pub const LATENCY_HEADER: &str = "x-mock-latency-ms";
 /// Request header that forces the response status for one request.
 pub const STATUS_HEADER: &str = "x-mock-status";
+/// Request header that delays the response body (not the headers) by this
+/// many milliseconds, to simulate a stalled stream.
+pub const BODY_DELAY_HEADER: &str = "x-mock-body-delay-ms";
 /// Response header naming the backend that answered.
 pub const BACKEND_HEADER: &str = "x-mock-backend";
 /// Health endpoint: 200 when healthy, 503 otherwise. Not counted in stats.
@@ -84,15 +90,16 @@ async fn respond(
     req: Request<Incoming>,
     behavior: Arc<Behavior>,
     stats: Arc<Stats>,
-) -> Result<Response<Full<Bytes>>, Infallible> {
+) -> Result<Response<MockBody>, Infallible> {
     if req.uri().path() == HEALTH_PATH {
-        let mut resp = Response::new(Full::new(Bytes::from_static(b"ok")));
+        let mut resp = Response::new(MockBody::now(Bytes::from_static(b"ok")));
         if !stats.healthy() {
             *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
         }
         return Ok(resp);
     }
     let latency = header_u64(&req, LATENCY_HEADER).map_or(behavior.latency, Duration::from_millis);
+    let body_delay = header_u64(&req, BODY_DELAY_HEADER).map(Duration::from_millis);
     let forced = header_u64(&req, STATUS_HEADER)
         .and_then(|s| u16::try_from(s).ok())
         .and_then(|s| StatusCode::from_u16(s).ok());
@@ -135,7 +142,11 @@ async fn respond(
         "headers": headers,
         "body_bytes": body_bytes,
     });
-    let mut resp = Response::new(Full::new(Bytes::from(echo.to_string())));
+    let data = Bytes::from(echo.to_string());
+    let mut resp = Response::new(match body_delay {
+        Some(d) => MockBody::delayed(data, d),
+        None => MockBody::now(data),
+    });
     *resp.status_mut() = status;
     resp.headers_mut().insert(
         http::header::CONTENT_TYPE,
@@ -145,6 +156,62 @@ async fn respond(
         resp.headers_mut().insert(BACKEND_HEADER, name);
     }
     Ok(resp)
+}
+
+/// Response body of the HTTP mock: ready at once, or after a delay that
+/// starts once the headers are sent.
+#[derive(Debug)]
+pub struct MockBody {
+    delay: Option<Pin<Box<Sleep>>>,
+    data: Option<Bytes>,
+}
+
+impl MockBody {
+    fn now(data: Bytes) -> Self {
+        Self {
+            delay: None,
+            data: Some(data),
+        }
+    }
+
+    fn delayed(data: Bytes, delay: Duration) -> Self {
+        Self {
+            delay: Some(Box::pin(tokio::time::sleep(delay))),
+            data: Some(data),
+        }
+    }
+}
+
+impl Body for MockBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+        let this = self.get_mut();
+        if let Some(delay) = this.delay.as_mut() {
+            if delay.as_mut().poll(cx).is_pending() {
+                return Poll::Pending;
+            }
+            this.delay = None;
+        }
+        Poll::Ready(this.data.take().map(|d| Ok(Frame::data(d))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.data.is_none()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        match (&self.delay, &self.data) {
+            // Unknown length forces chunked encoding, so headers go out first.
+            (Some(_), _) => SizeHint::default(),
+            (None, Some(d)) => SizeHint::with_exact(d.len() as u64),
+            (None, None) => SizeHint::with_exact(0),
+        }
+    }
 }
 
 fn header_u64<B>(req: &Request<B>, name: &str) -> Option<u64> {
