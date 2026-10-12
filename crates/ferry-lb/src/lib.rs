@@ -1,16 +1,28 @@
-//! Load balancing for Ferry.
+//! Load balancing, health checking and upstream connection pools for Ferry.
 //!
-//! Balancers pick an index into a slice the caller owns (endpoints of a
-//! cluster, or backends of a rule). They hold only atomics, so a pick never
-//! takes a lock and never allocates.
+//! - [`ClusterBalancer`] picks an endpoint of a cluster with one of five
+//!   policies (round robin, weighted round robin, least request, P2C-EWMA and
+//!   Maglev), skipping unhealthy endpoints unless the cluster is in panic mode.
+//! - [`EndpointState`] is the live, reload-surviving state of one endpoint:
+//!   health, in-flight requests and a peak latency EWMA.
+//! - [`health`] runs active HTTP and gRPC health checks.
+//! - [`pool`] keeps upstream HTTP/1.1 and h2c connections.
+//! - [`WeightedSelector`] and [`RoundRobin`] implement the small [`Balancer`]
+//!   trait for splitting a rule's traffic across clusters.
 //!
-//! M0 ships [`RoundRobin`] for endpoints and [`WeightedSelector`] for splitting
-//! traffic across a rule's backends. M1 adds weighted round robin,
-//! least-request, P2C-EWMA and Maglev behind the same [`Balancer`] trait.
+//! Every pick is lock-free and allocation-free; anything that allocates
+//! (rebuilding a host set or a Maglev table) runs off the hot path.
 
+mod cluster;
+mod endpoint;
+pub mod health;
+pub mod maglev;
+pub mod pool;
 mod round_robin;
 mod weighted;
 
+pub use cluster::{ClusterBalancer, Host, HostSet, Policy};
+pub use endpoint::{DEFAULT_RTT, EWMA_DECAY, EndpointState, FAILURE_PENALTY, RequestGuard};
 pub use round_robin::RoundRobin;
 pub use weighted::WeightedSelector;
 

@@ -444,6 +444,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-queue"
+version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03e8bd762f7479489c70ed6c768ddca99d7296857de437a68dcb2a94365b3fae"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-utils"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -622,7 +631,21 @@ dependencies = [
 name = "ferry-lb"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
+ "bytes",
+ "crossbeam-queue",
+ "fastrand",
+ "ferry-testkit",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "proptest",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "twox-hash",
 ]
 
 [[package]]
@@ -2104,6 +2127,12 @@ dependencies = [
  "sha1",
  "thiserror",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "typenum"
