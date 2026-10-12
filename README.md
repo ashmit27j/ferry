@@ -6,9 +6,11 @@ Ferry terminates TLS and proxies HTTP/1.1, HTTP/2, gRPC and WebSockets to backen
 pods. It is configured through the Kubernetes Gateway API and runs on AWS EKS
 behind a Network Load Balancer.
 
-> **Status: M0 (foundations).** The workspace, CI, mock backends and a minimal
-> HTTP/1.1 + h2c proxy exist. TLS, the controller and the full feature set are
-> planned for M1–M5. See [`CLAUDE.md`](CLAUDE.md) for milestone status.
+> **Status: M1 (core proxy).** HTTP/1.1 and h2c serving and proxying (including
+> gRPC to h2c upstreams), Gateway API matching and filters, five load-balancing
+> policies, active HTTP and gRPC health checks, and hot reload from a file.
+> TLS, timeouts, retries, metrics and the Kubernetes controller are planned for
+> M2–M5. See [`CLAUDE.md`](CLAUDE.md) for milestone status.
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Helvetica Neue, Arial", "primaryColor": "#ffffff", "primaryTextColor": "#171717", "primaryBorderColor": "#dfdfdf", "lineColor": "#707070", "secondaryColor": "#fafafa", "tertiaryColor": "#ffffff"}}}%%
@@ -38,6 +40,10 @@ curl -s http://127.0.0.1:8080/hello
 # {"backend":"hello","method":"GET","path":"/hello",...}
 ```
 
+Edit `examples/hello.yaml` while the proxy runs and it reloads within a second;
+an invalid edit is logged and ignored. [`examples/gateway.yaml`](examples/gateway.yaml)
+shows every routing, balancing and health-check option.
+
 Validate a config without running it, or print its JSON Schema:
 
 ```sh
@@ -51,7 +57,7 @@ cargo run -p ferry -- check-config --schema > ferry.schema.json
 | --- | --- |
 | `bin/ferry` | Single binary: `proxy`, `controller`, `check-config` |
 | `crates/ferry-config` | Config model, validation, immutable snapshots |
-| `crates/ferry-lb` | Balancers (health checks, outlier detection and pools from M1) |
+| `crates/ferry-lb` | Balancers, health checks, upstream connection pools |
 | `crates/ferry-proxy` | Listeners, router, forwarding, hot swap, drain |
 | `crates/ferry-controller` | Gateway API reconciler (M4) |
 | `crates/ferry-api` | Protobuf + gRPC for controller → proxy snapshots |
