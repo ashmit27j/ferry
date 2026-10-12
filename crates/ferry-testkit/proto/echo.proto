@@ -1,0 +1,28 @@
+// Echo service used by Ferry's gRPC interop tests. Covers all four call kinds.
+syntax = "proto3";
+
+package ferry.testkit.echo.v1;
+
+service Echo {
+  // Returns the request message once.
+  rpc Unary(EchoRequest) returns (EchoResponse);
+  // Returns the request message `count` times.
+  rpc ServerStream(EchoRequest) returns (stream EchoResponse);
+  // Joins every received message with "," and returns it once.
+  rpc ClientStream(stream EchoRequest) returns (EchoResponse);
+  // Echoes each message as it arrives.
+  rpc Bidi(stream EchoRequest) returns (stream EchoResponse);
+}
+
+message EchoRequest {
+  string message = 1;
+  uint32 count = 2;
+}
+
+message EchoResponse {
+  string message = 1;
+  // Name of the mock backend that answered.
+  string backend = 2;
+  // Zero-based position within a stream.
+  uint32 sequence = 3;
+}

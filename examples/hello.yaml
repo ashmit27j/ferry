@@ -1,0 +1,25 @@
+# The smallest useful Ferry config: one listener, one route, one cluster.
+#
+#   mock-backend --name hello --http 127.0.0.1:9001
+#   ferry proxy --config examples/hello.yaml
+#   curl -s http://127.0.0.1:8080/hello
+#
+# Validate without running:  ferry check-config examples/hello.yaml
+# JSON Schema for editors:   ferry check-config --schema
+
+listeners:
+  - name: http
+    address: 127.0.0.1:8080
+    routes:
+      - name: hello
+        rules:
+          - matches:
+              - path: { type: PathPrefix, value: / }
+            backends:
+              - cluster: hello
+
+clusters:
+  - name: hello
+    lb_policy: round_robin
+    endpoints:
+      - address: 127.0.0.1:9001

@@ -1,0 +1,45 @@
+[package]
+name = "ferry-testkit"
+description = "Mock backends (HTTP/1.1, h2c, gRPC, WebSocket) with latency and error injection, for Ferry tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "mock-backend"
+path = "src/bin/mock-backend.rs"
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+fastrand.workspace = true
+futures-util = { workspace = true, features = ["sink", "std"] }
+http.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["http1", "http2", "server"] }
+hyper-util = { workspace = true, features = ["tokio", "server-auto", "service"] }
+prost.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "time", "macros", "sync", "signal"] }
+tokio-stream = { workspace = true, features = ["net"] }
+tokio-tungstenite.workspace = true
+tokio-util.workspace = true
+tonic = { workspace = true, features = ["router", "server", "transport"] }
+tonic-prost.workspace = true
+tracing.workspace = true
+
+[build-dependencies]
+protox.workspace = true
+tonic-prost-build.workspace = true
+
+[dev-dependencies]
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2"] }
+tonic = { workspace = true, features = ["channel"] }
+
+[lints]
+workspace = true

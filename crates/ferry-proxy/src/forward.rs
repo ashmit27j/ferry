@@ -1,0 +1,211 @@
+//! Forwarding one request upstream and turning failures into responses.
+
+use std::convert::Infallible;
+use std::sync::Arc;
+
+use bytes::Bytes;
+use http::header::{self, HeaderMap, HeaderName, HeaderValue};
+use http::uri::{Authority, PathAndQuery, Scheme};
+use http::{Request, Response, StatusCode, Uri, Version};
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Incoming;
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
+use tracing::{debug, warn};
+
+use crate::state::Runtime;
+
+/// Body type of every response Ferry produces.
+pub type ProxyBody = BoxBody<Bytes, hyper::Error>;
+
+/// Upstream HTTP client shared by all listeners.
+pub(crate) type UpstreamClient = Client<HttpConnector, Incoming>;
+
+/// Hop-by-hop headers (RFC 9110 §7.6.1) that must not be forwarded.
+static HOP_BY_HOP: [HeaderName; 7] = [
+    header::CONNECTION,
+    HeaderName::from_static("proxy-connection"),
+    HeaderName::from_static("keep-alive"),
+    header::TE,
+    header::TRAILER,
+    header::TRANSFER_ENCODING,
+    header::UPGRADE,
+];
+
+/// Handles one downstream request on `listener`.
+pub(crate) async fn handle(
+    runtime: Arc<Runtime>,
+    client: UpstreamClient,
+    listener: usize,
+    req: Request<Incoming>,
+) -> Result<Response<ProxyBody>, Infallible> {
+    let Some(router) = runtime.routers.get(listener) else {
+        // The listener was removed by a reload while this connection was open.
+        return Ok(local_reply(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "listener removed",
+        ));
+    };
+    let host = request_host(&req).unwrap_or_default();
+    let Some(decision) = router.route(host, req.uri().path()) else {
+        debug!(host, path = req.uri().path(), "no route");
+        return Ok(local_reply(StatusCode::NOT_FOUND, "no route"));
+    };
+    let Some(cluster) = decision.cluster else {
+        return Ok(local_reply(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "all backends have zero weight",
+        ));
+    };
+    let Some(authority) = runtime.pick_endpoint(cluster).cloned() else {
+        return Ok(local_reply(StatusCode::SERVICE_UNAVAILABLE, "no endpoints"));
+    };
+
+    let upstream_req = match build_upstream_request(req, authority.clone()) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "cannot build upstream request");
+            return Ok(local_reply(StatusCode::BAD_REQUEST, "bad request"));
+        }
+    };
+
+    match client.request(upstream_req).await {
+        Ok(resp) => {
+            let (mut parts, body) = resp.into_parts();
+            strip_hop_by_hop(&mut parts.headers);
+            Ok(Response::from_parts(parts, body.boxed()))
+        }
+        Err(e) => {
+            warn!(
+                route = decision.route,
+                cluster = runtime.cluster_name(cluster),
+                upstream = %authority,
+                error = %e,
+                "upstream request failed",
+            );
+            Ok(local_reply(StatusCode::BAD_GATEWAY, "upstream unavailable"))
+        }
+    }
+}
+
+/// The request's host: the `Host` header, or the URI authority for HTTP/2.
+fn request_host<B>(req: &Request<B>) -> Option<&str> {
+    req.headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .or_else(|| req.uri().authority().map(Authority::as_str))
+}
+
+/// Rewrites a downstream request for the upstream at `authority`.
+fn build_upstream_request(
+    req: Request<Incoming>,
+    authority: Authority,
+) -> Result<Request<Incoming>, http::Error> {
+    let (mut parts, body) = req.into_parts();
+    // HTTP/2 carries the host in :authority; keep it as Host for the HTTP/1.1 upstream
+    // instead of letting the client fill in the endpoint address.
+    if !parts.headers.contains_key(header::HOST)
+        && let Some(value) = parts
+            .uri
+            .authority()
+            .and_then(|a| HeaderValue::from_str(a.as_str()).ok())
+    {
+        parts.headers.insert(header::HOST, value);
+    }
+    strip_hop_by_hop(&mut parts.headers);
+    let path = parts
+        .uri
+        .path_and_query()
+        .cloned()
+        .unwrap_or_else(|| PathAndQuery::from_static("/"));
+    parts.uri = Uri::builder()
+        .scheme(Scheme::HTTP)
+        .authority(authority)
+        .path_and_query(path)
+        .build()?;
+    parts.version = Version::HTTP_11;
+    Ok(Request::from_parts(parts, body))
+}
+
+/// Removes hop-by-hop headers, including any named in `Connection`.
+pub(crate) fn strip_hop_by_hop(headers: &mut HeaderMap) {
+    let named: Vec<HeaderName> = headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .filter_map(|name| HeaderName::from_bytes(name.trim().as_bytes()).ok())
+        .collect();
+    for name in named {
+        headers.remove(name);
+    }
+    for name in &HOP_BY_HOP {
+        headers.remove(name);
+    }
+}
+
+/// A response generated by Ferry itself.
+pub(crate) fn local_reply(status: StatusCode, message: &'static str) -> Response<ProxyBody> {
+    let mut resp = Response::new(
+        Full::new(Bytes::from_static(message.as_bytes()))
+            .map_err(|never| match never {})
+            .boxed(),
+    );
+    *resp.status_mut() = status;
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_static_and_connection_named_headers() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::CONNECTION,
+            HeaderValue::from_static("keep-alive, X-Secret"),
+        );
+        h.insert("x-secret", HeaderValue::from_static("1"));
+        h.insert("keep-alive", HeaderValue::from_static("timeout=5"));
+        h.insert(
+            header::TRANSFER_ENCODING,
+            HeaderValue::from_static("chunked"),
+        );
+        h.insert(header::UPGRADE, HeaderValue::from_static("h2c"));
+        h.insert("x-keep", HeaderValue::from_static("yes"));
+        strip_hop_by_hop(&mut h);
+        assert_eq!(h.len(), 1);
+        assert!(h.contains_key("x-keep"));
+    }
+
+    #[test]
+    fn local_reply_sets_status_and_type() {
+        let r = local_reply(StatusCode::NOT_FOUND, "no route");
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            r.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/plain; charset=utf-8"
+        );
+    }
+
+    #[test]
+    fn host_falls_back_to_authority() {
+        let req = Request::builder()
+            .uri("http://h2.example.com/x")
+            .body(())
+            .unwrap();
+        assert_eq!(request_host(&req), Some("h2.example.com"));
+        let req = Request::builder()
+            .uri("/x")
+            .header(header::HOST, "h1.example.com")
+            .body(())
+            .unwrap();
+        assert_eq!(request_host(&req), Some("h1.example.com"));
+    }
+}

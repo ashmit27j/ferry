@@ -1,0 +1,29 @@
+[package]
+name = "ferry-proxy"
+description = "Ferry data plane: listeners, routing, forwarding and drain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+arc-swap.workspace = true
+bytes.workspace = true
+ferry-config.workspace = true
+ferry-lb.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["http1", "http2", "server", "client"] }
+hyper-util = { workspace = true, features = ["tokio", "server-auto", "server-graceful", "client-legacy", "http1", "http2"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "rt", "time", "macros", "sync"] }
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[lints]
+workspace = true

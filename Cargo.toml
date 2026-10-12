@@ -1,0 +1,98 @@
+[workspace]
+resolver = "3"
+members = [
+    "bin/ferry",
+    "crates/ferry-api",
+    "crates/ferry-config",
+    "crates/ferry-controller",
+    "crates/ferry-lb",
+    "crates/ferry-proxy",
+    "crates/ferry-telemetry",
+    "crates/ferry-testkit",
+    "tests",
+    "bench",
+]
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+repository = "https://github.com/ashmit27j/ferry"
+publish = false
+
+[workspace.dependencies]
+# Internal crates
+ferry-api = { path = "crates/ferry-api" }
+ferry-config = { path = "crates/ferry-config" }
+ferry-controller = { path = "crates/ferry-controller" }
+ferry-lb = { path = "crates/ferry-lb" }
+ferry-proxy = { path = "crates/ferry-proxy" }
+ferry-telemetry = { path = "crates/ferry-telemetry" }
+ferry-testkit = { path = "crates/ferry-testkit" }
+
+# Runtime and HTTP
+tokio = "1.53"
+tokio-util = "0.7.20"
+tokio-stream = "0.1.19"
+futures-util = { version = "0.3.34", default-features = false }
+hyper = "1.12"
+hyper-util = "0.1.21"
+http = "1.5"
+http-body-util = "0.1.5"
+bytes = "1.12"
+arc-swap = "1.9"
+
+# gRPC
+tonic = "0.14.6"
+tonic-prost = "0.14.6"
+tonic-prost-build = "0.14.6"
+prost = "0.14.4"
+protox = "0.10"
+
+# Config and serialization
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+serde-saphyr = "1.3"
+schemars = "1.2"
+
+# Errors, CLI, telemetry
+thiserror = "2.0.21"
+anyhow = "1.0.104"
+clap = { version = "4.6", features = ["derive", "env"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+tikv-jemallocator = "0.7"
+
+# Test and bench support
+tokio-tungstenite = "0.30"
+fastrand = "2.5"
+proptest = "1.12"
+criterion = "0.8"
+tempfile = "3.27"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+# Rule 1 of CLAUDE.md: nothing on the request path or in library code may panic.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "warn"
+print_stderr = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+
+[profile.bench]
+debug = "line-tables-only"
