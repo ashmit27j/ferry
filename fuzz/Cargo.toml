@@ -1,0 +1,24 @@
+[package]
+name = "ferry-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+ferry-config = { path = "../crates/ferry-config" }
+
+# Keep the fuzz crate out of the main workspace; cargo-fuzz needs nightly.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "config_yaml"
+path = "fuzz_targets/config_yaml.rs"
+test = false
+doc = false
+bench = false

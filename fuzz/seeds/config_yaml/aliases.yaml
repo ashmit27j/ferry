@@ -1,0 +1,13 @@
+listeners:
+  - &l
+    name: http
+    address: 127.0.0.1:8080
+    routes:
+      - name: r
+        hostnames: ["*.example.com", api.example.com]
+        rules:
+          - matches: [{ path: { type: Exact, value: /healthz } }, { path: { value: /api/ } }]
+            backends: [{ cluster: a, weight: 90 }, { cluster: b, weight: 10 }]
+clusters:
+  - { name: a, lb_policy: round_robin, endpoints: [{ address: "10.0.0.1:80" }, { address: "[fd00::1]:80" }] }
+  - { name: b, endpoints: [{ address: 10.0.0.2:80 }] }
