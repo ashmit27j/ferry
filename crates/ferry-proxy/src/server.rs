@@ -433,7 +433,7 @@ fn serve(
         });
         let result = match tls {
             None => {
-                let conn = builder.serve_connection(TokioIo::new(stream), service);
+                let conn = builder.serve_connection_with_upgrades(TokioIo::new(stream), service);
                 watcher.watch(conn.into_owned()).await
             }
             Some(config) => {
@@ -450,7 +450,8 @@ fn serve(
                             return;
                         }
                     };
-                let conn = builder.serve_connection(TokioIo::new(tls_stream), service);
+                let conn =
+                    builder.serve_connection_with_upgrades(TokioIo::new(tls_stream), service);
                 watcher.watch(conn.into_owned()).await
             }
         };

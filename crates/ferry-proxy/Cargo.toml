@@ -23,7 +23,7 @@ http-body-util.workspace = true
 hyper = { workspace = true, features = ["http1", "http2", "server", "client"] }
 hyper-util = { workspace = true, features = ["tokio", "server-auto", "server-graceful", "http1", "http2"] }
 thiserror.workspace = true
-tokio = { workspace = true, features = ["net", "rt", "time", "macros", "sync", "fs"] }
+tokio = { workspace = true, features = ["net", "rt", "time", "macros", "sync", "fs", "io-util"] }
 tokio-util.workspace = true
 tracing.workspace = true
 

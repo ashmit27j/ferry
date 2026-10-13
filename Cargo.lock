@@ -740,6 +740,7 @@ dependencies = [
  "ferry-config",
  "ferry-proxy",
  "ferry-testkit",
+ "futures-util",
  "http",
  "http-body-util",
  "hyper",
@@ -752,6 +753,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-stream",
+ "tokio-tungstenite",
  "tokio-util",
  "tonic",
 ]

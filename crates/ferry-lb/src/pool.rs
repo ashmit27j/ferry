@@ -323,7 +323,8 @@ where
         tokio::spawn(async move {
             // The connection slot is held until the connection ends.
             let _permit = permit;
-            if let Err(e) = conn.await {
+            // with_upgrades lets a 101 response hand the socket to a tunnel.
+            if let Err(e) = conn.with_upgrades().await {
                 debug!(%addr, error = %e, "upstream http/1.1 connection closed with error");
             }
         });

@@ -30,7 +30,9 @@ use crate::grpc;
 use crate::router::{RequestInfo, normalize_host};
 use crate::state::{ClusterRuntime, Runtime, hash_key, set_cookie};
 use ferry_lb::pool::PoolError;
-use ferry_lb::{Outcome, Permit};
+use ferry_lb::{Outcome, Permit, RequestGuard};
+use hyper::upgrade::OnUpgrade;
+use hyper_util::rt::TokioIo;
 
 /// Most endpoints one request is sent to.
 pub const MAX_ATTEMPTS: usize = 3;
@@ -80,7 +82,11 @@ pub(crate) async fn handle(
     Ok(proxy(&runtime, from, req).await)
 }
 
-async fn proxy(runtime: &Runtime, from: Downstream, req: Request<Incoming>) -> Response<ProxyBody> {
+async fn proxy(
+    runtime: &Runtime,
+    from: Downstream,
+    mut req: Request<Incoming>,
+) -> Response<ProxyBody> {
     let grpc = grpc::is_grpc(req.headers());
     let fail = |status, message| error_reply(grpc, status, message);
     let Some(listener) = runtime
@@ -161,12 +167,24 @@ async fn proxy(runtime: &Runtime, from: Downstream, req: Request<Incoming>) -> R
     let matched_path = decision.matched.path();
     let filters = rule.filters();
 
+    // WebSocket and other HTTP/1.1 upgrades, to HTTP/1.1 clusters only (ADR 0025).
+    let upgrade = (req.version() == Version::HTTP_11
+        && cluster.config.protocol() == UpstreamProtocol::Http1)
+        .then(|| upgrade_protocol(req.headers()))
+        .flatten();
+    let on_upgrade = upgrade.is_some().then(|| hyper::upgrade::on(&mut req));
     let (mut parts, body) = req.into_parts();
     let wants_trailers = parts.headers.get_all(header::TE).iter().any(|v| {
         v.to_str()
             .is_ok_and(|s| s.split(',').any(|t| t.trim() == "trailers"))
     });
     strip_hop_by_hop(&mut parts.headers);
+    if let Some(protocol) = upgrade {
+        parts.headers.insert(header::UPGRADE, protocol);
+        parts
+            .headers
+            .insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
+    }
     let request_id = set_edge_headers(&mut parts.headers, from);
     if wants_trailers {
         // The one TE value HTTP/2 allows, and the one gRPC requires.
@@ -227,7 +245,9 @@ async fn proxy(runtime: &Runtime, from: Downstream, req: Request<Incoming>) -> R
         policy,
     };
     let run = async {
-        let upstream = UpstreamRequest::new(parts, path_and_query, cluster, body, policy).await?;
+        let mut upstream =
+            UpstreamRequest::new(parts, path_and_query, cluster, body, policy).await?;
+        upstream.on_upgrade = on_upgrade;
         attempts.run(upstream).await
     };
     let result = match deadline {
@@ -332,6 +352,8 @@ const MAX_TOTAL_ATTEMPTS: usize = 11;
 struct UpstreamRequest {
     pending: Option<Request<UpstreamBody>>,
     replay: Option<Replay>,
+    /// The downstream side of an upgrade request, completed after a 101.
+    on_upgrade: Option<OnUpgrade>,
 }
 
 struct Replay {
@@ -411,6 +433,7 @@ impl UpstreamRequest {
         Ok(Self {
             pending: Some(Request::from_parts(parts, body)),
             replay,
+            on_upgrade: None,
         })
     }
 
@@ -594,8 +617,24 @@ impl Attempts<'_> {
                 None => Some(conn.send(request).await),
             };
             match sent {
-                Some(Ok(resp)) => {
+                Some(Ok(mut resp)) => {
                     guard.observe_response();
+                    if resp.status() == StatusCode::SWITCHING_PROTOCOLS
+                        && let Some(downstream) = req.on_upgrade.take()
+                    {
+                        let upstream = hyper::upgrade::on(&mut resp);
+                        let (mut parts, _) = resp.into_parts();
+                        let protocol = parts.headers.get(header::UPGRADE).cloned();
+                        strip_hop_by_hop(&mut parts.headers);
+                        if let Some(p) = protocol {
+                            parts.headers.insert(header::UPGRADE, p);
+                            parts
+                                .headers
+                                .insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
+                        }
+                        tokio::spawn(tunnel(downstream, upstream, guard, request_slot));
+                        return Ok(Response::from_parts(parts, empty_body()));
+                    }
                     cluster
                         .balancer
                         .record(index, Outcome::from_status(resp.status().as_u16()));
@@ -660,6 +699,44 @@ impl Attempts<'_> {
         }
         Err(last)
     }
+}
+
+/// The `Upgrade` value of a request that asks for one (`Connection: upgrade`).
+fn upgrade_protocol(headers: &HeaderMap) -> Option<HeaderValue> {
+    let wants = headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|t| t.trim().eq_ignore_ascii_case("upgrade"));
+    wants
+        .then(|| headers.get(header::UPGRADE).cloned())
+        .flatten()
+}
+
+/// Copies bytes both ways between an upgraded client and backend until either
+/// closes. The endpoint's in-flight guard and request slot live as long as the
+/// tunnel, so balancing and circuit breakers see it as one long request.
+async fn tunnel(downstream: OnUpgrade, upstream: OnUpgrade, guard: RequestGuard, slot: Permit) {
+    let (down, up) = match tokio::try_join!(downstream, upstream) {
+        Ok(pair) => pair,
+        Err(e) => {
+            debug!(error = %e, "upgrade failed");
+            return;
+        }
+    };
+    let (mut down, mut up) = (TokioIo::new(down), TokioIo::new(up));
+    match tokio::io::copy_bidirectional(&mut down, &mut up).await {
+        Ok((sent, received)) => debug!(sent, received, "upgraded connection closed"),
+        Err(e) => debug!(error = %e, "upgraded connection ended with error"),
+    }
+    drop((guard, slot));
+}
+
+fn empty_body() -> ProxyBody {
+    Full::new(Bytes::new())
+        .map_err(|never| match never {})
+        .boxed()
 }
 
 fn is_idempotent(m: &Method) -> bool {
