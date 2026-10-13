@@ -109,6 +109,11 @@ dbg_macro = "deny"
 print_stdout = "warn"
 print_stderr = "warn"
 
+# Full debuginfo made each test binary's PDB 100-200 MB on Windows, and
+# target/ grew past 100 GB in a day. Line tables keep backtraces readable.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
