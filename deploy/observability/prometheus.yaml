@@ -1,0 +1,11 @@
+# Scrapes Ferry's admin API. In Kubernetes, kube-prometheus-stack does this
+# through a PodMonitor (M4 Helm chart).
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: ferry
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["ferry-m3:9901"]

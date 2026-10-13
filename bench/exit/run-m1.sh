@@ -22,7 +22,7 @@ RATE=${RATE:-10000}
 start_env() { # $1 = RELOAD flag
   docker rm -f ferry-m1 >/dev/null 2>&1 || true
   docker run -d --name ferry-m1 --cpuset-cpus 0-9 \
-    -e RELOAD="$1" -v ferry-target:/target:ro -v "$ROOT/bench/exit:/exit:ro" \
+    -e RELOAD="$1" -e FERRY_ARGS="${FERRY_ARGS:-}" -v ferry-target:/target:ro -v "$ROOT/bench/exit:/exit:ro" \
     $IMAGE bash /exit/m1-env.sh >/dev/null
   for _ in $(seq 1 50); do
     docker exec ferry-m1 bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080' 2>/dev/null && return 0

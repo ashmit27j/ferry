@@ -1,0 +1,36 @@
+# Config for the M3 exit run (bench/exit/run-m3.sh). The reloader rewrites
+# RELOAD_MARK every few seconds, so reloads show on the dashboard.
+listeners:
+  - name: http
+    address: 0.0.0.0:8080
+    routes:
+      - name: limited
+        rate_limit: { requests: 5, per: 1s }
+        rules:
+          - matches: [{ path: { type: PathPrefix, value: /limited } }]
+            backends: [{ cluster: app }]
+      - name: bench
+        rules:
+          - filters:
+              - type: ResponseHeaderModifier
+                set: [{ name: x-config-mark, value: "RELOAD_MARK" }]
+            retry: { attempts: 2, codes: [502, 503], backoff: 10ms }
+            backends: [{ cluster: app }]
+
+clusters:
+  - name: app
+    lb_policy: p2c_ewma
+    health_check:
+      interval: 1s
+      timeout: 500ms
+      unhealthy_threshold: 2
+      healthy_threshold: 2
+      http: { path: /healthz }
+    outlier_detection:
+      consecutive_5xx: 5
+      base_ejection_time: 10s
+      max_ejection_percent: 34
+    endpoints:
+      - address: 127.0.0.1:9001
+      - address: 127.0.0.1:9002
+      - address: 127.0.0.1:9003

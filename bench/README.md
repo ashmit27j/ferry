@@ -50,4 +50,14 @@ bench/exit/run-m1.sh
 
 k6 summaries land in `bench/exit/results/`. `bench/exit/sockets.sh` counts
 upstream and downstream sockets by TCP state inside the container, which is how
-connection churn is checked.
+connection churn is checked. Extra `ferry proxy` flags go in `FERRY_ARGS`, e.g.
+`FERRY_ARGS="--access-log /run/ferry/access.log" bench/exit/run-m1.sh` to
+measure the cost of access logging.
+
+`bench/exit/run-m3.sh` is the M3 exit run: Ferry, three traced mocks, an
+OpenTelemetry Collector, Tempo, Prometheus and Grafana on one Docker network,
+2,000 req/s from k6 for three minutes with a backend killed and reloads every
+5 s, then traced requests. `bench/exit/m3-check.py` evaluates every dashboard
+panel's query against Prometheus and follows each trace in Tempo; results go
+to `bench/exit/results/m3-*.json`. See
+[`deploy/observability`](../deploy/observability/README.md).

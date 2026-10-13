@@ -1,0 +1,15 @@
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://m3-prom:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 5s
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://m3-tempo:3200

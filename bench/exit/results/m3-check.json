@@ -1,0 +1,606 @@
+{
+  "panels": [
+    {
+      "section": "Service level objectives",
+      "title": "Added latency p50",
+      "targets": [
+        {
+          "legend": "p50",
+          "series": 1,
+          "values": [
+            1.3e-05
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Service level objectives",
+      "title": "Added latency p99",
+      "targets": [
+        {
+          "legend": "p99",
+          "series": 1,
+          "values": [
+            4.5e-05
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Service level objectives",
+      "title": "Requests per core-second",
+      "targets": [
+        {
+          "legend": "req/s per core",
+          "series": 1,
+          "values": [
+            7265.564424
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Service level objectives",
+      "title": "Success ratio",
+      "targets": [
+        {
+          "legend": "success",
+          "series": 1,
+          "values": [
+            1.0
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Service level objectives",
+      "title": "Failed or cut-off requests (range)",
+      "targets": [
+        {
+          "legend": "dropped",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Service level objectives",
+      "title": "Resident memory growth",
+      "targets": [
+        {
+          "legend": "per hour",
+          "series": 1,
+          "values": [
+            -7078302.266841
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Service level objectives",
+      "title": "Added latency (Ferry overhead)",
+      "targets": [
+        {
+          "legend": "p50",
+          "series": 1,
+          "values": [
+            1.3e-05
+          ]
+        },
+        {
+          "legend": "p90",
+          "series": 1,
+          "values": [
+            2.4e-05
+          ]
+        },
+        {
+          "legend": "p99",
+          "series": 1,
+          "values": [
+            4.5e-05
+          ]
+        },
+        {
+          "legend": "p99.9",
+          "series": 1,
+          "values": [
+            6e-05
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Service level objectives",
+      "title": "Reloads, restarts and failures",
+      "targets": [
+        {
+          "legend": "reloads / min",
+          "series": 1,
+          "values": [
+            12.000873
+          ]
+        },
+        {
+          "legend": "rejected configs / min",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        },
+        {
+          "legend": "proxies started in the last minute",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        },
+        {
+          "legend": "5xx / s",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        },
+        {
+          "legend": "cut off / s",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Service level objectives",
+      "title": "Resident memory",
+      "targets": [
+        {
+          "legend": "{{instance}}",
+          "series": 1,
+          "values": [
+            31453184.0
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Requests by route (RED)",
+      "title": "Request rate",
+      "targets": [
+        {
+          "legend": "{{route}}",
+          "series": 3,
+          "values": [
+            0.0,
+            1158.611535,
+            0.0
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Requests by route (RED)",
+      "title": "Error ratio (5xx)",
+      "targets": [
+        {
+          "legend": "{{route}}",
+          "series": 3,
+          "values": [
+            NaN,
+            0.0,
+            NaN
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Requests by route (RED)",
+      "title": "Request duration p99",
+      "targets": [
+        {
+          "legend": "{{route}}",
+          "series": 3,
+          "values": [
+            NaN,
+            0.000495,
+            NaN
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Requests by route (RED)",
+      "title": "Responses by status class",
+      "targets": [
+        {
+          "legend": "{{code_class}}",
+          "series": 5,
+          "values": [
+            0.0,
+            1158.611535,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Requests by route (RED)",
+      "title": "Local replies by reason",
+      "targets": [
+        {
+          "legend": "{{reason}}",
+          "series": 0,
+          "values": []
+        }
+      ],
+      "has_data": false
+    },
+    {
+      "section": "Requests by route (RED)",
+      "title": "gRPC status",
+      "targets": [
+        {
+          "legend": "{{grpc_code}}",
+          "series": 0,
+          "values": []
+        }
+      ],
+      "has_data": false
+    },
+    {
+      "section": "Backends",
+      "title": "Upstream rate by cluster",
+      "targets": [
+        {
+          "legend": "{{cluster}}",
+          "series": 1,
+          "values": [
+            1158.611535
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Backends",
+      "title": "Upstream 5xx ratio",
+      "targets": [
+        {
+          "legend": "{{cluster}}",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Backends",
+      "title": "Upstream latency p99",
+      "targets": [
+        {
+          "legend": "{{cluster}}",
+          "series": 1,
+          "values": [
+            0.000495
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Backends",
+      "title": "Endpoints",
+      "targets": [
+        {
+          "legend": "{{cluster}} configured",
+          "series": 1,
+          "values": [
+            3.0
+          ]
+        },
+        {
+          "legend": "{{cluster}} healthy",
+          "series": 1,
+          "values": [
+            2.0
+          ]
+        },
+        {
+          "legend": "{{cluster}} ejected",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        },
+        {
+          "legend": "{{cluster}} eligible",
+          "series": 1,
+          "values": [
+            2.0
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Backends",
+      "title": "Ejections and panic mode",
+      "targets": [
+        {
+          "legend": "{{cluster}} ejections / min",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        },
+        {
+          "legend": "{{cluster}} panic",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Backends",
+      "title": "Upstream failures",
+      "targets": [
+        {
+          "legend": "{{cluster}} connect",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        },
+        {
+          "legend": "{{cluster}} reset",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        },
+        {
+          "legend": "{{cluster}} timeout",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Backends",
+      "title": "Retries and retry budget",
+      "targets": [
+        {
+          "legend": "{{cluster}} retries / s",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        },
+        {
+          "legend": "{{cluster}} budget exhausted / s",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        },
+        {
+          "legend": "{{cluster}} budget remaining",
+          "series": 1,
+          "values": [
+            100.0
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Backends",
+      "title": "Circuit breakers",
+      "targets": [
+        {
+          "legend": "{{cluster}} {{breaker}} used",
+          "series": 4,
+          "values": [
+            0.048828,
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "legend": "{{cluster}} {{breaker}} overflow / s",
+          "series": 0,
+          "values": []
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Backends",
+      "title": "Connections and load per endpoint",
+      "targets": [
+        {
+          "legend": "{{cluster}} idle pooled",
+          "series": 1,
+          "values": [
+            50.0
+          ]
+        },
+        {
+          "legend": "{{cluster}} open",
+          "series": 1,
+          "values": [
+            50.0
+          ]
+        },
+        {
+          "legend": "{{cluster}} in flight",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Proxy",
+      "title": "Downstream connections",
+      "targets": [
+        {
+          "legend": "{{listener}} open",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        },
+        {
+          "legend": "{{listener}} new / s",
+          "series": 1,
+          "values": [
+            0.018183
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Proxy",
+      "title": "Handshake and PROXY errors",
+      "targets": [
+        {
+          "legend": "{{listener}} TLS",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        },
+        {
+          "legend": "{{listener}} PROXY",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        }
+      ],
+      "has_data": true
+    },
+    {
+      "section": "Proxy",
+      "title": "Config",
+      "targets": [
+        {
+          "legend": "{{instance}} version",
+          "series": 1,
+          "values": [
+            41.0
+          ]
+        },
+        {
+          "legend": "{{instance}} seconds since load",
+          "series": 1,
+          "values": [
+            4.798
+          ]
+        },
+        {
+          "legend": "access log drops / s",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        },
+        {
+          "legend": "draining",
+          "series": 1,
+          "values": [
+            0.0
+          ]
+        }
+      ],
+      "has_data": true
+    }
+  ],
+  "traces": [
+    {
+      "trace_id": "a99c3d87217eb8a822e872508bdbe6ab",
+      "spans": 4,
+      "services": [
+        "ferry",
+        "mock-b",
+        "trace-client"
+      ],
+      "chains": [
+        [
+          "trace-client:SPAN_KIND_CLIENT:GET",
+          "ferry:SPAN_KIND_SERVER:GET bench",
+          "ferry:SPAN_KIND_CLIENT:GET",
+          "mock-b:SPAN_KIND_SERVER:GET /traced"
+        ]
+      ],
+      "client_ferry_backend": true
+    },
+    {
+      "trace_id": "971260d9888f872e85fccae2e10ee886",
+      "spans": 4,
+      "services": [
+        "ferry",
+        "mock-b",
+        "trace-client"
+      ],
+      "chains": [
+        [
+          "trace-client:SPAN_KIND_CLIENT:GET",
+          "ferry:SPAN_KIND_SERVER:GET bench",
+          "ferry:SPAN_KIND_CLIENT:GET",
+          "mock-b:SPAN_KIND_SERVER:GET /traced"
+        ]
+      ],
+      "client_ferry_backend": true
+    },
+    {
+      "trace_id": "4376a49db7fa32f3d111e27cc4b92be6",
+      "spans": 4,
+      "services": [
+        "ferry",
+        "mock-b",
+        "trace-client"
+      ],
+      "chains": [
+        [
+          "trace-client:SPAN_KIND_CLIENT:GET",
+          "ferry:SPAN_KIND_SERVER:GET bench",
+          "ferry:SPAN_KIND_CLIENT:GET",
+          "mock-b:SPAN_KIND_SERVER:GET /traced"
+        ]
+      ],
+      "client_ferry_backend": true
+    }
+  ]
+}

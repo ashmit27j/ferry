@@ -1,0 +1,24 @@
+# OpenTelemetry Collector: receives OTLP from Ferry and backends, batches,
+# and forwards to Tempo. In-cluster, the collector from the environment
+# (plan §6) plays this role.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch: {}
+
+exporters:
+  otlp:
+    endpoint: m3-tempo:4317
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp]

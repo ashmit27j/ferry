@@ -17,7 +17,7 @@ done
 
 # Ferry gets exactly one core: tokio sizes its worker pool from the affinity mask.
 FERRY_LOG=info taskset -c "${FERRY_CPUS:-0}" "$BIN/ferry" proxy \
-  --config /run/ferry/ferry.yaml --watch-interval-ms 200 \
+  --config /run/ferry/ferry.yaml --watch-interval-ms 200 ${FERRY_ARGS:-} \
   > /run/ferry/ferry.log 2>&1 &
 echo $! > /run/ferry/ferry.pid
 
