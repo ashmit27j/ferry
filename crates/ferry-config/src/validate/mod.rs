@@ -94,9 +94,6 @@ impl Validator {
         config: &Config,
         cluster_ids: &HashMap<&str, ClusterId>,
     ) -> Vec<Listener> {
-        if config.listeners.is_empty() {
-            self.err("listeners", "must define at least one listener");
-        }
         let mut names = HashSet::new();
         let mut addrs: HashSet<SocketAddr> = HashSet::new();
         let mut out = Vec::with_capacity(config.listeners.len());
@@ -113,6 +110,12 @@ impl Validator {
                 self.err(
                     format!("{at}.address"),
                     format!("duplicate listener address {}", listener.address),
+                );
+            }
+            if listener.advertised_port == Some(0) {
+                self.err(
+                    format!("{at}.advertised_port"),
+                    "must be between 1 and 65535",
                 );
             }
             let mut route_names = HashSet::new();
@@ -165,6 +168,7 @@ impl Validator {
                 routes,
                 tls,
                 proxy_protocol: listener.proxy_protocol,
+                advertised_port: listener.advertised_port,
                 limits,
                 timeouts,
             });
@@ -304,7 +308,6 @@ clusters:
         assert_errors_at(
             yaml,
             &[
-                "clusters[0].endpoints",
                 "listeners[0].routes[0].hostnames[0]",
                 "listeners[0].routes[0].hostnames[1]",
                 "listeners[0].routes[0].rules[0].matches[0].path.value",
@@ -315,12 +318,13 @@ clusters:
         );
     }
 
+    /// A Gateway whose listeners are all invalid, or a Service scaled to
+    /// zero, still produces a snapshot (M4).
     #[test]
-    fn rejects_empty_listeners_and_rules() {
-        let errs = snapshot("listeners: []\nclusters: []\n")
-            .expect_err("invalid")
-            .0;
-        assert_eq!(errs[0].path, "listeners");
+    fn accepts_empty_listeners_and_clusters() {
+        let snap = snapshot("listeners: []\nclusters: [{ name: c, endpoints: [] }]\n").unwrap();
+        assert!(snap.listeners().is_empty());
+        assert!(snap.clusters()[0].endpoints().is_empty());
     }
 
     #[test]

@@ -62,6 +62,13 @@ pub struct ListenerConfig {
     /// Connection-level timeouts.
     #[serde(default)]
     pub timeouts: Option<ListenerTimeoutsConfig>,
+    /// The port clients connect to, when it differs from the bound port (a
+    /// Kubernetes Service mapping port 80 to container port 10080). Redirects
+    /// that keep the port use it. Absent means the bound port.
+    // Fields added after M3 skip their default when serialized, so a proxy
+    // one release behind accepts snapshots that do not use them (ADR 0033).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertised_port: Option<u16>,
 }
 
 /// A set of rules that apply to one or more hostnames (Gateway API `HTTPRoute`).
@@ -96,9 +103,16 @@ pub struct RuleConfig {
     #[serde(default)]
     pub filters: Vec<FilterConfig>,
     /// Weighted backends that matching requests are split across. Must be
-    /// empty when the rule has a `RequestRedirect` filter, and non-empty otherwise.
+    /// empty when the rule has a `RequestRedirect` filter. Otherwise it must
+    /// be non-empty unless `invalid_backend_weight` is set.
     #[serde(default)]
     pub backends: Vec<BackendRefConfig>,
+    /// Combined weight of backends that could not be resolved. That share of
+    /// matching requests is answered with 500, as the Gateway API requires for
+    /// invalid `backendRefs`. The controller sets it; with no `backends`, every
+    /// matching request gets 500.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub invalid_backend_weight: u32,
     /// Request timeouts.
     #[serde(default)]
     pub timeouts: Option<RouteTimeoutsConfig>,
@@ -336,7 +350,8 @@ pub struct ClusterConfig {
     /// Cap on retries relative to traffic; defaults apply when absent.
     #[serde(default)]
     pub retry_budget: Option<RetryBudgetConfig>,
-    /// Upstream endpoints. Must not be empty.
+    /// Upstream endpoints. May be empty (a Kubernetes Service scaled to
+    /// zero); requests to an empty cluster get 503.
     pub endpoints: Vec<EndpointConfig>,
 }
 
@@ -469,6 +484,11 @@ const fn default_weight() -> u32 {
     1
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde passes a reference
+const fn is_zero(v: &u32) -> bool {
+    *v == 0
+}
+
 // Constructors. The types are `#[non_exhaustive]`, so code outside this crate
 // (the controller, tests) builds them with these and then sets optional fields.
 
@@ -495,6 +515,7 @@ impl ListenerConfig {
             proxy_protocol: false,
             limits: None,
             timeouts: None,
+            advertised_port: None,
         }
     }
 }
@@ -698,5 +719,22 @@ mod tests {
             ..HealthCheckConfig::default()
         };
         assert!(grpc.http.is_none());
+    }
+
+    /// The controller sends configs as JSON; fields added after M3 must not
+    /// appear unless used, or an older proxy would reject the snapshot as
+    /// having unknown fields (ADR 0033).
+    #[test]
+    fn new_fields_are_absent_from_json_until_used() {
+        let mut listener = ListenerConfig::new("l", "127.0.0.1:0".parse().unwrap());
+        listener.routes.push(RouteConfig::new(
+            "r",
+            vec![RuleConfig::forward(vec![BackendRefConfig::new("c", 1)])],
+        ));
+        let json = serde_json::to_string(&Config::new(vec![listener], Vec::new())).unwrap();
+        assert!(!json.contains("advertised_port"), "{json}");
+        assert!(!json.contains("invalid_backend_weight"), "{json}");
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.listeners[0].advertised_port, None);
     }
 }

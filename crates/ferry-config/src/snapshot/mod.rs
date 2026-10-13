@@ -105,6 +105,7 @@ pub struct Listener {
     pub(crate) routes: Vec<Route>,
     pub(crate) tls: Option<ListenerTls>,
     pub(crate) proxy_protocol: bool,
+    pub(crate) advertised_port: Option<u16>,
     pub(crate) limits: Limits,
     pub(crate) timeouts: ListenerTimeouts,
 }
@@ -120,6 +121,12 @@ impl Listener {
     #[must_use]
     pub fn proxy_protocol(&self) -> bool {
         self.proxy_protocol
+    }
+
+    /// The port clients connect to, if it differs from the bound port.
+    #[must_use]
+    pub fn advertised_port(&self) -> Option<u16> {
+        self.advertised_port
     }
 
     /// Request limits.
@@ -242,6 +249,7 @@ pub struct Rule {
     pub(crate) matches: Vec<RequestMatch>,
     pub(crate) filters: Vec<Filter>,
     pub(crate) backends: Vec<WeightedBackend>,
+    pub(crate) invalid_backend_weight: u32,
     pub(crate) timeouts: RouteTimeouts,
     pub(crate) retry: Option<RetryPolicy>,
 }
@@ -280,10 +288,17 @@ impl Rule {
         })
     }
 
-    /// Backends. Empty only for redirect rules.
+    /// Backends. Empty for redirect rules and for rules whose every backend
+    /// reference was invalid.
     #[must_use]
     pub fn backends(&self) -> &[WeightedBackend] {
         &self.backends
+    }
+
+    /// Weight of invalid backend references, whose share of requests gets 500.
+    #[must_use]
+    pub fn invalid_backend_weight(&self) -> u32 {
+        self.invalid_backend_weight
     }
 }
 

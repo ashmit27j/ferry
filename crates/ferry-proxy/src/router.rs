@@ -74,8 +74,9 @@ pub struct Decision<'a> {
     pub rule: &'a Rule,
     /// The match that selected the rule (needed for prefix rewrites).
     pub matched: &'a RequestMatch,
-    /// Chosen cluster, or `None` if the rule redirects or every backend has
-    /// weight zero (the Gateway API says the latter gets a 500).
+    /// Chosen cluster, or `None` if the rule redirects, every backend has
+    /// weight zero, or the pick landed on the share of invalid backend
+    /// references (the Gateway API says the last two get a 500).
     pub cluster: Option<ClusterId>,
 }
 
@@ -91,8 +92,17 @@ impl Router {
                     .rules()
                     .iter()
                     .map(|rule| {
-                        let weights: Vec<u32> =
-                            rule.backends().iter().map(|b| b.weight()).collect();
+                        // Invalid backend references get one more slot; picking
+                        // it finds no backend, which answers 500.
+                        let weights: Vec<u32> = rule
+                            .backends()
+                            .iter()
+                            .map(|b| b.weight())
+                            .chain(
+                                (rule.invalid_backend_weight() > 0)
+                                    .then_some(rule.invalid_backend_weight()),
+                            )
+                            .collect();
                         WeightedSelector::new(&weights)
                     })
                     .collect(),
@@ -415,6 +425,38 @@ clusters:
         assert_eq!(
             route_of(&r, &req("drained.example.com", "/")),
             Some(("drained".into(), None))
+        );
+    }
+
+    /// Gateway API: the share of an invalid backendRef gets 500, the rest
+    /// still reaches valid backends.
+    #[test]
+    fn invalid_backend_share_routes_nowhere() {
+        let yaml = "
+listeners:
+  - name: l
+    address: 127.0.0.1:0
+    routes:
+      - name: split
+        rules:
+          - backends: [{ cluster: c0, weight: 1 }]
+            invalid_backend_weight: 3
+      - name: broken
+        hostnames: [broken.test]
+        rules:
+          - invalid_backend_weight: 1
+clusters:
+  - { name: c0, endpoints: [{ address: 10.0.0.1:80 }] }
+";
+        let r = router(yaml);
+        let picks: Vec<_> = (0..400)
+            .map(|_| route_of(&r, &req("a.test", "/")).unwrap().1)
+            .collect();
+        let valid = picks.iter().filter(|c| c.is_some()).count();
+        assert_eq!(valid, 100, "one in four requests reaches c0");
+        assert_eq!(
+            route_of(&r, &req("broken.test", "/")),
+            Some(("broken".into(), None))
         );
     }
 

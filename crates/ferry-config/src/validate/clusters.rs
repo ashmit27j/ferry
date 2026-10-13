@@ -43,9 +43,6 @@ impl Validator {
 
     fn cluster(&mut self, at: &str, cluster: &ClusterConfig) -> Cluster {
         self.name(&format!("{at}.name"), &cluster.name);
-        if cluster.endpoints.is_empty() {
-            self.err(format!("{at}.endpoints"), "must list at least one endpoint");
-        }
         let mut addrs = HashSet::new();
         let mut endpoints = Vec::with_capacity(cluster.endpoints.len());
         for (ei, ep) in cluster.endpoints.iter().enumerate() {

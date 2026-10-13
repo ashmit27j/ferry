@@ -198,7 +198,7 @@ async fn proxy(
             ex,
             Reason::Misconfigured,
             StatusCode::INTERNAL_SERVER_ERROR,
-            "all backends have zero weight",
+            "no valid backend",
         );
     };
     let Some(cluster) = runtime.cluster(cluster_id) else {

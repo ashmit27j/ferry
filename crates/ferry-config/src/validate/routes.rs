@@ -67,8 +67,20 @@ impl Validator {
                 "must be empty when the rule has a RequestRedirect filter",
             );
         }
-        if !redirect && rule.backends.is_empty() {
+        if redirect && rule.invalid_backend_weight > 0 {
+            self.err(
+                format!("{at}.invalid_backend_weight"),
+                "must be 0 when the rule has a RequestRedirect filter",
+            );
+        }
+        if !redirect && rule.backends.is_empty() && rule.invalid_backend_weight == 0 {
             self.err(format!("{at}.backends"), "must list at least one backend");
+        }
+        if rule.invalid_backend_weight > MAX_BACKEND_WEIGHT {
+            self.err(
+                format!("{at}.invalid_backend_weight"),
+                format!("must be at most {MAX_BACKEND_WEIGHT}"),
+            );
         }
         let backends = self.backends(at, &rule.backends, cluster_ids);
         let timeouts = self.route_timeouts(&format!("{at}.timeouts"), rule.timeouts.as_ref());
@@ -80,6 +92,7 @@ impl Validator {
             matches,
             filters,
             backends,
+            invalid_backend_weight: rule.invalid_backend_weight,
             timeouts,
             retry,
         }
@@ -567,6 +580,38 @@ clusters:
         assert_errors_at(&both, &["listeners[0].routes[0].rules[0].backends"]);
         let neither = one_rule("filters: []");
         assert_errors_at(&neither, &["listeners[0].routes[0].rules[0].backends"]);
+        let redirect_and_invalid =
+            one_rule("filters: [{ type: RequestRedirect }]\n            invalid_backend_weight: 1");
+        assert_errors_at(
+            &redirect_and_invalid,
+            &["listeners[0].routes[0].rules[0].invalid_backend_weight"],
+        );
+    }
+
+    /// Rules whose backend references were all invalid answer 500; the
+    /// controller states that with `invalid_backend_weight` (Gateway API).
+    #[test]
+    fn invalid_backend_weight_stands_in_for_backends() {
+        let only_invalid = one_rule("invalid_backend_weight: 1");
+        let snap = snapshot(&only_invalid).expect("valid");
+        let rule = &snap.listeners()[0].routes()[0].rules()[0];
+        assert!(rule.backends().is_empty());
+        assert_eq!(rule.invalid_backend_weight(), 1);
+
+        let mixed = one_rule(
+            "backends: [{ cluster: c, weight: 3 }]\n            invalid_backend_weight: 1",
+        );
+        let snap = snapshot(&mixed).expect("valid");
+        assert_eq!(
+            snap.listeners()[0].routes()[0].rules()[0].invalid_backend_weight(),
+            1
+        );
+
+        let heavy = one_rule("invalid_backend_weight: 1000001");
+        assert_errors_at(
+            &heavy,
+            &["listeners[0].routes[0].rules[0].invalid_backend_weight"],
+        );
     }
 
     #[test]
