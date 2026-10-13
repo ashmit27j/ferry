@@ -1,10 +1,27 @@
 //! Telemetry for Ferry.
 //!
-//! M0 sets up structured logging. Prometheus metrics, OpenTelemetry tracing and
-//! the access-log formatter arrive in M3.
+//! - [`metrics`]: Prometheus metrics with lock-free handles for the request
+//!   path (ADR 0027), plus `process_*` metrics.
+//! - [`trace`]: OpenTelemetry spans with W3C `traceparent` propagation,
+//!   exported over OTLP/gRPC (ADR 0028).
+//! - [`access_log`]: JSON access logs written off the request path (ADR 0029).
+//! - [`init_logging`]: Ferry's own diagnostic logs on stderr.
+//!
+//! A [`Telemetry`] bundles the three for the proxy.
+
+pub mod access_log;
+pub mod histogram;
+pub mod metrics;
+mod process;
+pub mod trace;
 
 use std::io::IsTerminal;
 use std::str::FromStr;
+use std::sync::Arc;
+
+pub use access_log::AccessLog;
+pub use metrics::Metrics;
+pub use trace::Tracing;
 
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -49,6 +66,21 @@ pub enum TelemetryError {
     /// A global subscriber was already installed.
     #[error("tracing subscriber already initialised: {0}")]
     AlreadyInitialised(String),
+    /// The OpenTelemetry exporter could not be built or flushed.
+    #[error("tracing: {0}")]
+    Tracing(String),
+}
+
+/// What the proxy reports through: metrics always, tracing and access logs
+/// when enabled.
+#[derive(Debug, Default)]
+pub struct Telemetry {
+    /// The metrics registry.
+    pub metrics: Arc<Metrics>,
+    /// The tracer, when an OTLP endpoint is configured.
+    pub tracing: Option<Tracing>,
+    /// The access log, when enabled.
+    pub access_log: Option<AccessLog>,
 }
 
 /// Installs the global tracing subscriber, writing to stderr.
