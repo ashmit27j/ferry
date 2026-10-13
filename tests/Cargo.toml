@@ -86,6 +86,7 @@ path = "it/dashboard.rs"
 [dependencies]
 bytes.workspace = true
 ferry-config.workspace = true
+ferry-controller.workspace = true
 ferry-proxy.workspace = true
 ferry-telemetry.workspace = true
 ferry-testkit.workspace = true
@@ -114,3 +115,7 @@ workspace = true
 [[test]]
 name = "listeners"
 path = "it/listeners.rs"
+
+[[test]]
+name = "snapshots"
+path = "it/snapshots.rs"

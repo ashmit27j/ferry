@@ -1,4 +1,4 @@
-//! The `ferry` binary: `proxy`, `controller` and `check-config`.
+//! The `ferry` binary: `proxy`, `controller`, `certgen`, `crds` and `check-config`.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -37,11 +37,18 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run the data plane from a config file.
+    /// Run the data plane, from a config file or from the controller.
     Proxy {
-        /// Path to the YAML config.
-        #[arg(long, short)]
-        config: PathBuf,
+        /// Path to the YAML config (standalone mode).
+        #[arg(
+            long,
+            short,
+            required_unless_present = "controller",
+            conflicts_with = "controller"
+        )]
+        config: Option<PathBuf>,
+        #[command(flatten)]
+        remote: RemoteArgs,
         /// Seconds to wait for in-flight requests on shutdown.
         #[arg(long, default_value_t = ferry_proxy::DEFAULT_DRAIN_TIMEOUT.as_secs())]
         drain_timeout_secs: u64,
@@ -57,8 +64,26 @@ enum Command {
         #[command(flatten)]
         observability: Observability,
     },
-    /// Run the Kubernetes control plane (milestone M4).
-    Controller,
+    /// Run the Kubernetes Gateway API controller.
+    Controller(ControllerArgs),
+    /// Create or renew the certificates of the controller-to-proxy stream
+    /// (run by the Helm chart as a hook Job).
+    Certgen {
+        /// Namespace of the Secrets.
+        #[arg(long, env = "POD_NAMESPACE", default_value = "ferry-system")]
+        namespace: String,
+        /// Secret for the controller's server certificate.
+        #[arg(long, default_value = "ferry-controller-tls")]
+        controller_secret: String,
+        /// Secret for the proxies' client certificate.
+        #[arg(long, default_value = "ferry-proxy-tls")]
+        proxy_secret: String,
+        /// DNS names of the controller Service (repeat the flag).
+        #[arg(long = "dns-name", required = true)]
+        dns_names: Vec<String>,
+    },
+    /// Print the FerryPolicy CustomResourceDefinition (JSON, which is valid YAML).
+    Crds,
     /// Validate a config file and exit non-zero if it is invalid.
     CheckConfig {
         /// Path to the YAML config. Omit with --schema.
@@ -75,6 +100,65 @@ enum Command {
         #[arg(long, conflicts_with = "schema")]
         print: bool,
     },
+}
+
+/// `ferry proxy` in Kubernetes: follow the controller instead of a file.
+#[derive(Debug, Clone, clap::Args)]
+struct RemoteArgs {
+    /// Controller snapshot endpoint, e.g. <https://ferry-controller.ferry-system.svc:18000>.
+    #[arg(long, requires = "gateway")]
+    controller: Option<String>,
+    /// The Gateway this proxy serves, as namespace/name.
+    #[arg(long)]
+    gateway: Option<String>,
+    /// This proxy's identity in acks (the pod name).
+    #[arg(long, env = "POD_NAME", default_value = "ferry-proxy")]
+    proxy_id: String,
+    /// Directory with ca.crt, tls.crt and tls.key for mutual TLS to the
+    /// controller. Without it the stream is plaintext (development only).
+    #[arg(long)]
+    controller_tls_dir: Option<PathBuf>,
+    /// Name to verify in the controller's certificate.
+    #[arg(long, default_value = "ferry-controller.ferry-system.svc")]
+    controller_server_name: String,
+}
+
+/// `ferry controller`.
+#[derive(Debug, clap::Args)]
+struct ControllerArgs {
+    /// The controller's namespace; proxy fleets and the leader Lease live here.
+    #[arg(long, env = "POD_NAMESPACE", default_value = "ferry-system")]
+    namespace: String,
+    /// This replica's identity for leader election (the pod name).
+    #[arg(long, env = "POD_NAME", default_value = "ferry-controller")]
+    identity: String,
+    /// GatewayClass spec.controllerName to own.
+    #[arg(long, default_value = ferry_controller::CONTROLLER_NAME)]
+    controller_name: String,
+    /// Address of the snapshot gRPC server proxies connect to.
+    #[arg(long, default_value = "0.0.0.0:18000")]
+    snapshot_address: SocketAddr,
+    /// Address of /healthz, /readyz and /debug/proxies.
+    #[arg(long, default_value = "0.0.0.0:18001")]
+    health_address: SocketAddr,
+    /// Directory with ca.crt, tls.crt and tls.key for the snapshot server;
+    /// proxies must present certificates signed by that CA.
+    #[arg(long)]
+    tls_dir: Option<PathBuf>,
+    /// YAML file describing proxy Deployments and Services (the Helm chart
+    /// writes it from its values).
+    #[arg(long)]
+    proxy_template: Option<PathBuf>,
+    /// Lead without electing (a single replica).
+    #[arg(long)]
+    no_leader_election: bool,
+}
+
+/// Where `ferry proxy` gets its configuration.
+#[derive(Debug)]
+enum Source {
+    File(PathBuf),
+    Controller(RemoteArgs),
 }
 
 /// Admin API, metrics, tracing and access-log settings of `ferry proxy`.
@@ -149,17 +233,19 @@ fn run(command: Command) -> anyhow::Result<ExitCode> {
         } => Ok(check_config(config, schema, output, print)),
         Command::Proxy {
             config,
+            remote,
             drain_timeout_secs,
             drain_delay_secs,
             watch_interval_ms,
             observability,
         } => {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .context("building tokio runtime")?;
-            runtime.block_on(proxy(
-                config,
+            let source = match (config, &remote.controller) {
+                (Some(path), _) => Source::File(path),
+                (None, Some(_)) => Source::Controller(remote),
+                (None, None) => anyhow::bail!("give --config or --controller"),
+            };
+            tokio_runtime()?.block_on(proxy(
+                source,
                 ferry_proxy::Drain {
                     delay: Duration::from_secs(drain_delay_secs),
                     timeout: Duration::from_secs(drain_timeout_secs),
@@ -169,15 +255,127 @@ fn run(command: Command) -> anyhow::Result<ExitCode> {
             ))?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::Controller => {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .context("building tokio runtime")?;
-            runtime.block_on(ferry_controller::run())?;
+        Command::Controller(args) => {
+            tokio_runtime()?.block_on(controller(args))?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Certgen {
+            namespace,
+            controller_secret,
+            proxy_secret,
+            dns_names,
+        } => {
+            tokio_runtime()?.block_on(async {
+                let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+                let client = kube::Client::try_default().await?;
+                ferry_controller::certgen::ensure(
+                    client,
+                    &namespace,
+                    &controller_secret,
+                    &proxy_secret,
+                    &dns_names,
+                )
+                .await?;
+                Ok::<_, anyhow::Error>(())
+            })?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Crds => {
+            use kube::CustomResourceExt;
+            out(&serde_json::to_string_pretty(
+                &ferry_controller::policy::FerryPolicy::crd(),
+            )?);
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+fn tokio_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime")
+}
+
+/// Reads `ca.crt`, `tls.crt` and `tls.key` from a mounted Secret.
+fn tls_dir(dir: &std::path::Path) -> anyhow::Result<(String, String, String)> {
+    let read = |f: &str| {
+        let path = dir.join(f);
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))
+    };
+    Ok((read("ca.crt")?, read("tls.crt")?, read("tls.key")?))
+}
+
+async fn controller(args: ControllerArgs) -> anyhow::Result<()> {
+    let tls = match &args.tls_dir {
+        Some(dir) => {
+            let (ca_pem, cert_pem, key_pem) = tls_dir(dir)?;
+            Some(ferry_controller::server::TlsFiles {
+                ca_pem,
+                cert_pem,
+                key_pem,
+            })
+        }
+        None => None,
+    };
+    let template = match &args.proxy_template {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            serde_saphyr::from_str(&text).with_context(|| format!("parsing {}", path.display()))?
+        }
+        None => ferry_controller::provision::ProxyTemplate::default(),
+    };
+    let opts = ferry_controller::Options {
+        namespace: args.namespace,
+        identity: args.identity,
+        controller_name: args.controller_name,
+        snapshot_address: args.snapshot_address,
+        admin_address: args.health_address,
+        tls,
+        template,
+        leader_election: !args.no_leader_election,
+    };
+    info!(namespace = %opts.namespace, identity = %opts.identity, "starting the controller");
+    ferry_controller::run(opts, shutdown_signal()).await?;
+    Ok(())
+}
+
+/// Starts following the controller; the proxy has no config until the
+/// first snapshot arrives.
+fn follow_controller(
+    remote: &RemoteArgs,
+    proxy: &ferry_proxy::Proxy,
+    stop: &tokio_util::sync::CancellationToken,
+) -> anyhow::Result<()> {
+    let tls = match &remote.controller_tls_dir {
+        Some(dir) => {
+            let (ca_pem, cert_pem, key_pem) = tls_dir(dir)?;
+            Some(ferry_proxy::remote::RemoteTls {
+                ca_pem,
+                cert_pem,
+                key_pem,
+                server_name: remote.controller_server_name.clone(),
+            })
+        }
+        None => {
+            warn!("no --controller-tls-dir: the snapshot stream is not encrypted");
+            None
+        }
+    };
+    let source = ferry_proxy::remote::RemoteSource {
+        endpoint: remote.controller.clone().unwrap_or_default(),
+        gateway: remote.gateway.clone().unwrap_or_default(),
+        proxy_id: remote.proxy_id.clone(),
+        tls,
+    };
+    info!(controller = %source.endpoint, gateway = %source.gateway, "waiting for the first snapshot");
+    tokio::spawn(ferry_proxy::remote::follow(
+        source,
+        proxy.reload_handle(),
+        stop.clone(),
+    ));
+    Ok(())
 }
 
 /// Builds metrics, and tracing and access logs when enabled.
@@ -214,17 +412,26 @@ fn telemetry(o: &Observability) -> anyhow::Result<Telemetry> {
 }
 
 async fn proxy(
-    config: PathBuf,
+    source: Source,
     drain: ferry_proxy::Drain,
     watch: Duration,
     observability: Observability,
 ) -> anyhow::Result<()> {
-    let snapshot = ferry_config::load_snapshot(&config, SnapshotVersion(1))
-        .with_context(|| format!("loading {}", config.display()))?;
-    info!(config = %config.display(), version = %snapshot.version(), "config loaded");
     let telemetry = Arc::new(telemetry(&observability)?);
-    let proxy = ferry_proxy::Proxy::bind_with(snapshot, Arc::clone(&telemetry)).await?;
     let stop = tokio_util::sync::CancellationToken::new();
+    let proxy = match &source {
+        Source::File(config) => {
+            let snapshot = ferry_config::load_snapshot(config, SnapshotVersion(1))
+                .with_context(|| format!("loading {}", config.display()))?;
+            info!(config = %config.display(), version = %snapshot.version(), "config loaded");
+            ferry_proxy::Proxy::bind_with(snapshot, Arc::clone(&telemetry)).await?
+        }
+        Source::Controller(remote) => {
+            let proxy = ferry_proxy::Proxy::bind_awaiting(Arc::clone(&telemetry)).await?;
+            follow_controller(remote, &proxy, &stop)?;
+            proxy
+        }
+    };
     if let Some(addr) = observability.admin_address.0 {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
@@ -240,7 +447,9 @@ async fn proxy(
             }
         });
     }
-    if !watch.is_zero() {
+    if let Source::File(config) = &source
+        && !watch.is_zero()
+    {
         tokio::spawn(ferry_proxy::watch::watch_file(
             config.clone(),
             proxy.reload_handle(),

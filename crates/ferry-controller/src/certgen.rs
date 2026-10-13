@@ -131,6 +131,97 @@ pub fn needs_renewal(not_after_days: i64) -> bool {
     not_after_days - today() < RENEW_BEFORE_DAYS
 }
 
+/// Annotation recording a Secret's certificate expiry (days since the epoch).
+pub const NOT_AFTER_ANNOTATION: &str = "gateway.ferry.dev/not-after-days";
+
+fn tls_secret(
+    name: &str,
+    ca: &str,
+    cert: &str,
+    key: &str,
+    not_after_days: i64,
+) -> k8s_openapi::api::core::v1::Secret {
+    use k8s_openapi::ByteString;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    let bytes = |s: &str| ByteString(s.as_bytes().to_vec());
+    k8s_openapi::api::core::v1::Secret {
+        metadata: ObjectMeta {
+            name: Some(name.to_owned()),
+            labels: Some(
+                [(
+                    "app.kubernetes.io/managed-by".to_owned(),
+                    "ferry-certgen".to_owned(),
+                )]
+                .into(),
+            ),
+            annotations: Some(
+                [(NOT_AFTER_ANNOTATION.to_owned(), not_after_days.to_string())].into(),
+            ),
+            ..ObjectMeta::default()
+        },
+        type_: Some("kubernetes.io/tls".into()),
+        data: Some(
+            [
+                ("ca.crt".to_owned(), bytes(ca)),
+                ("tls.crt".to_owned(), bytes(cert)),
+                ("tls.key".to_owned(), bytes(key)),
+            ]
+            .into(),
+        ),
+        ..Default::default()
+    }
+}
+
+/// Creates or renews the controller and proxy Secrets in `namespace`.
+/// Returns whether new certificates were issued.
+///
+/// # Errors
+///
+/// Fails if the API calls fail or the names are invalid.
+pub async fn ensure(
+    client: kube::Client,
+    namespace: &str,
+    controller_secret: &str,
+    proxy_secret: &str,
+    server_names: &[String],
+) -> Result<bool, crate::ControllerError> {
+    use k8s_openapi::api::core::v1::Secret;
+    use kube::api::{Api, Patch, PatchParams};
+    let api: Api<Secret> = Api::namespaced(client, namespace);
+    let expiry = |s: &Secret| {
+        s.metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(NOT_AFTER_ANNOTATION))
+            .and_then(|v| v.parse::<i64>().ok())
+    };
+    let current = api.get_opt(controller_secret).await?;
+    let proxy = api.get_opt(proxy_secret).await?;
+    if let (Some(c), Some(p)) = (&current, &proxy)
+        && let (Some(a), Some(b)) = (expiry(c), expiry(p))
+        && !needs_renewal(a.min(b))
+    {
+        tracing::info!(namespace, "certificates are current");
+        return Ok(false);
+    }
+    let b = generate(server_names)?;
+    let params = PatchParams::apply("ferry-certgen").force();
+    for (name, cert, key) in [
+        (controller_secret, &b.server_cert, &b.server_key),
+        (proxy_secret, &b.client_cert, &b.client_key),
+    ] {
+        let doc = tls_secret(name, &b.ca_cert, cert, key, b.not_after_days);
+        api.patch(name, &params, &Patch::Apply(&doc)).await?;
+    }
+    tracing::info!(
+        namespace,
+        controller_secret,
+        proxy_secret,
+        "issued certificates"
+    );
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

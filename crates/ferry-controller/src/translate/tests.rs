@@ -116,6 +116,7 @@ fn run(w: &World) -> Translation {
             .clone()
             .into_snapshot(SnapshotVersion(1))
             .unwrap_or_else(|e| panic!("{k}: config does not validate: {e}"));
+        assert!(g.valid, "{k}");
     }
     t
 }

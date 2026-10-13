@@ -179,6 +179,9 @@ pub struct GatewayOutput {
     pub addresses: Vec<(String, String)>,
     /// The proxies' configuration, rate limits already split per replica.
     pub config: Config,
+    /// Whether `config` validates. An invalid one would be a translator bug;
+    /// it is never published.
+    pub valid: bool,
     /// Service ports the proxy Service exposes.
     pub ports: Vec<ProxyPort>,
 }
@@ -658,6 +661,7 @@ impl<'w> GatewayState<'w> {
         } else {
             Cond::ok("Accepted", "Accepted")
         };
+        let valid = invalid.is_none();
         let programmed = if !accepted.status {
             Cond::new(
                 "Programmed",
@@ -691,6 +695,7 @@ impl<'w> GatewayState<'w> {
             listeners: listener_statuses,
             addresses: fleet.addresses,
             config,
+            valid,
             ports,
         }
     }

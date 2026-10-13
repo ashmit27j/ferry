@@ -129,10 +129,85 @@ fn check_config_prints_schema() {
 }
 
 #[test]
-fn controller_fails_cleanly_until_m4() {
-    let out = ferry(&["controller"]);
+fn controller_without_a_cluster_fails_cleanly() {
+    let out = Command::new(FERRY)
+        .args(["controller", "--no-leader-election"])
+        .env("KUBECONFIG", repo_root().join("no-such-kubeconfig"))
+        .env_remove("KUBERNETES_SERVICE_HOST")
+        .env("FERRY_LOG", "warn")
+        .output()
+        .unwrap();
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("milestone M4"));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("kubernetes"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn crds_prints_the_ferry_policy_crd() {
+    let out = ferry(&["crds"]);
+    assert!(out.status.success());
+    let crd: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(crd["metadata"]["name"], "ferrypolicies.gateway.ferry.dev");
+    // The chart ships this file; it must match what the binary generates.
+    let shipped =
+        std::fs::read_to_string(repo_root().join("deploy/helm/ferry/crds/ferrypolicies.yaml"))
+            .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&shipped).unwrap(),
+        crd,
+        "regenerate with: cargo run -p ferry -- crds > deploy/helm/ferry/crds/ferrypolicies.yaml"
+    );
+}
+
+#[test]
+fn proxy_needs_a_config_or_a_controller() {
+    let out = ferry(&["proxy"]);
+    assert!(!out.status.success());
+    let out = ferry(&["proxy", "--controller", "http://127.0.0.1:1"]);
+    assert!(!out.status.success(), "--controller needs --gateway");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn proxy_following_a_controller_is_not_ready_until_it_hears_from_it() {
+    let admin = free_port();
+    let dead = free_port();
+    let _child = ChildGuard(
+        Command::new(FERRY)
+            .args([
+                "proxy",
+                "--controller",
+                &format!("http://{dead}"),
+                "--gateway",
+                "infra/gw",
+                "--admin-address",
+                &admin.to_string(),
+            ])
+            .env("FERRY_LOG", "error")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let client = Client::builder(TokioExecutor::new()).build_http::<Empty<bytes::Bytes>>();
+    let ready: http::Uri = format!("http://{admin}/ready").parse().unwrap();
+    let live: http::Uri = format!("http://{admin}/live").parse().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let resp = loop {
+        match client.get(ready.clone()).await {
+            Ok(resp) => break resp,
+            Err(_) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await
+            }
+            Err(e) => panic!("proxy never came up: {e}"),
+        }
+    };
+    assert_eq!(resp.status(), 503);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body, "waiting for configuration\n");
+    assert_eq!(client.get(live).await.unwrap().status(), 200);
 }
 
 fn free_port() -> SocketAddr {

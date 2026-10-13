@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+axum = { workspace = true, features = ["tokio", "http1", "json"] }
 ferry-api.workspace = true
 ferry-config.workspace = true
 futures-util.workspace = true

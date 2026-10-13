@@ -19,6 +19,9 @@ ferry-config.workspace = true
 ferry-controller.workspace = true
 ferry-proxy.workspace = true
 ferry-telemetry.workspace = true
+kube.workspace = true
+rustls.workspace = true
+serde-saphyr.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tokio-util.workspace = true

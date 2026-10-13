@@ -86,10 +86,14 @@ def main() -> None:
             print(f"wrote {module}.rs ({plural} {api_version})")
     subprocess.run(["rustfmt", "--edition", "2024", *map(str, OUT.glob("*.rs"))], check=True)
     if "--crds" in sys.argv:
+        # Helm's crds/ directory takes CRDs only: drop the bundle's
+        # ValidatingAdmissionPolicy (it guards upgrades of existing installs).
+        docs = [d for d in bundle.split("\n---\n") if "kind: CustomResourceDefinition" in d]
+        header = f"# Gateway API {version} standard channel CRDs, from {URL.format(v=version)}\n"
         dest = ROOT / "deploy" / "helm" / "ferry" / "crds" / "gateway-api.yaml"
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(bundle, encoding="utf-8", newline="\n")
-        print(f"wrote {dest}")
+        dest.write_text(header + "---\n".join(d.strip() + "\n" for d in docs), encoding="utf-8", newline="\n")
+        print(f"wrote {dest} ({len(docs)} CRDs)")
 
 
 if __name__ == "__main__":

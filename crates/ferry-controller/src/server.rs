@@ -6,7 +6,6 @@
 //! replica publishes the same config for the same cluster state.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -179,13 +178,15 @@ impl Hub {
 #[derive(Debug, Clone)]
 pub struct SnapshotServer {
     hub: Arc<Hub>,
+    /// Ends every stream, so a graceful shutdown does not wait on them.
+    stop: CancellationToken,
 }
 
 impl SnapshotServer {
-    /// A service backed by `hub`.
+    /// A service backed by `hub` whose streams end when `stop` is cancelled.
     #[must_use]
-    pub fn new(hub: Arc<Hub>) -> Self {
-        Self { hub }
+    pub fn new(hub: Arc<Hub>, stop: CancellationToken) -> Self {
+        Self { hub, stop }
     }
 
     /// The tonic service, with size limits set.
@@ -233,6 +234,7 @@ impl SnapshotService for SnapshotServer {
         let mut snapshots = self.hub.subscribe(&gateway);
         let (tx, rx) = mpsc::channel(2);
         let hub = Arc::clone(&self.hub);
+        let stop = self.stop.clone();
         tokio::spawn(async move {
             let first = snapshots.borrow_and_update().clone();
             if let Some(p) = first
@@ -242,6 +244,9 @@ impl SnapshotService for SnapshotServer {
             }
             loop {
                 tokio::select! {
+                    // Proxies reconnect to another replica, or to this one
+                    // once it is back.
+                    () = stop.cancelled() => break,
                     changed = snapshots.changed() => {
                         if changed.is_err() {
                             break;
@@ -281,14 +286,14 @@ pub struct TlsFiles {
     pub key_pem: String,
 }
 
-/// Serves the snapshot API on `addr` until `stop` is cancelled. With `tls`,
-/// every client must present a certificate signed by its CA.
+/// Serves the snapshot API on `listener` until `stop` is cancelled. With
+/// `tls`, every client must present a certificate signed by its CA.
 ///
 /// # Errors
 ///
-/// Fails if the address cannot be bound or the TLS material is invalid.
+/// Fails if the TLS material is invalid or serving fails.
 pub async fn serve(
-    addr: SocketAddr,
+    listener: tokio::net::TcpListener,
     hub: Arc<Hub>,
     tls: Option<TlsFiles>,
     stop: CancellationToken,
@@ -305,10 +310,15 @@ pub async fn serve(
     } else {
         warn!("snapshot server runs without TLS; certificates cross the network in clear text");
     }
-    info!(%addr, "snapshot server listening");
+    if let Ok(addr) = listener.local_addr() {
+        info!(%addr, "snapshot server listening");
+    }
     builder
-        .add_service(SnapshotServer::new(hub).into_service())
-        .serve_with_shutdown(addr, stop.cancelled_owned())
+        .add_service(SnapshotServer::new(hub, stop.clone()).into_service())
+        .serve_with_incoming_shutdown(
+            tokio_stream::wrappers::TcpListenerStream::new(listener),
+            stop.cancelled_owned(),
+        )
         .await
 }
 
