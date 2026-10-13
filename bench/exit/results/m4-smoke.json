@@ -1,0 +1,31 @@
+{
+ "path": "/smoke/hello",
+ "host": "smoke.example",
+ "method": "GET",
+ "proto": "HTTP/1.1",
+ "headers": {
+  "Accept": [
+   "*/*"
+  ],
+  "User-Agent": [
+   "curl/7.88.1"
+  ],
+  "X-Ferry-Smoke": [
+   "1"
+  ],
+  "X-Forwarded-For": [
+   "10.244.0.1"
+  ],
+  "X-Forwarded-Proto": [
+   "http"
+  ],
+  "X-Request-Id": [
+   "6199ccfe-e9aa-4837-960c-52db8784f98d"
+  ]
+ },
+ "httpPort": "3000",
+ "namespace": "smoke",
+ "ingress": "",
+ "service": "",
+ "pod": "echo-575cbdb455-5gf4s"
+}
