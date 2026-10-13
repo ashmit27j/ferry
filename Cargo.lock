@@ -717,7 +717,10 @@ dependencies = [
  "ferry-config",
  "ferry-lb",
  "ferry-proxy",
+ "ferry-telemetry",
  "http",
+ "opentelemetry_sdk",
+ "serde_json",
 ]
 
 [[package]]
@@ -758,6 +761,7 @@ dependencies = [
  "opentelemetry-proto",
  "prost",
  "rcgen",
+ "regex",
  "rustls",
  "serde_json",
  "tempfile",

@@ -79,6 +79,10 @@ path = "it/observability.rs"
 name = "tracing"
 path = "it/tracing.rs"
 
+[[test]]
+name = "dashboard"
+path = "it/dashboard.rs"
+
 [dependencies]
 bytes.workspace = true
 ferry-config.workspace = true
@@ -91,6 +95,7 @@ http-body-util.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 serde_json.workspace = true
 prost.workspace = true
+regex.workspace = true
 tokio-tungstenite.workspace = true
 futures-util = { workspace = true, features = ["sink", "std"] }
 rcgen.workspace = true
