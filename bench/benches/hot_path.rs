@@ -6,12 +6,15 @@
 
 use std::hint::black_box;
 use std::sync::Arc;
+use std::time::Duration;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ferry_bench::route_table_yaml;
 use ferry_config::{SnapshotVersion, from_yaml_str};
 use ferry_lb::maglev::hash_key;
-use ferry_lb::{Balancer, ClusterBalancer, EndpointState, Host, Policy, WeightedSelector};
+use ferry_lb::{
+    Balancer, ClusterBalancer, EndpointState, Host, Limit, Policy, RetryBudget, WeightedSelector,
+};
 use ferry_proxy::Router;
 use ferry_proxy::router::RequestInfo;
 use http::{HeaderMap, Method};
@@ -27,6 +30,29 @@ fn hosts(n: usize) -> Vec<Host> {
             weight: u32::try_from(i % 4 + 1).unwrap(),
         })
         .collect()
+}
+
+fn resilience(c: &mut Criterion) {
+    let budget = RetryBudget::new(20, 10, Duration::from_secs(10));
+    c.bench_function("lb/retry_budget_deposit", |b| b.iter(|| budget.deposit()));
+    c.bench_function("lb/retry_budget_withdraw", |b| {
+        b.iter(|| black_box(budget.try_withdraw()))
+    });
+    let limit = Limit::new(1024);
+    c.bench_function("lb/breaker_acquire_release", |b| {
+        b.iter(|| drop(black_box(limit.try_acquire())))
+    });
+    let mut v2 = b"\r\n\r\n\0\r\nQUIT\n".to_vec();
+    v2.extend_from_slice(&[
+        0x21, 0x11, 0x00, 0x0c, 192, 0, 2, 1, 10, 0, 0, 1, 0xc7, 0x38, 0x01, 0xbb,
+    ]);
+    c.bench_function("edge/proxy_protocol_v2_parse", |b| {
+        b.iter(|| black_box(ferry_proxy::proxy_protocol::parse(black_box(&v2))))
+    });
+    let v1 = b"PROXY TCP4 192.0.2.1 10.0.0.1 51000 443\r\n";
+    c.bench_function("edge/proxy_protocol_v1_parse", |b| {
+        b.iter(|| black_box(ferry_proxy::proxy_protocol::parse(black_box(v1))))
+    });
 }
 
 fn balancers(c: &mut Criterion) {
@@ -99,5 +125,5 @@ fn config(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, balancers, routing, config);
+criterion_group!(benches, balancers, resilience, routing, config);
 criterion_main!(benches);

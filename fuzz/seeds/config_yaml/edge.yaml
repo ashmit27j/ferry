@@ -1,0 +1,78 @@
+# Ferry at the edge: every M2 setting (TLS, PROXY protocol, limits, timeouts,
+# retries, rate limits, circuit breakers, outlier detection, upstream mTLS).
+#
+#   ferry check-config examples/edge.yaml
+#
+# The certificate paths are where a Kubernetes Secret would be mounted; they
+# are read when the proxy starts, not by check-config.
+
+listeners:
+  - name: https
+    address: 0.0.0.0:8443
+    # An AWS NLB with PROXY protocol v2 enabled on the target group.
+    proxy_protocol: true
+    tls:
+      min_version: "1.2"
+      certificates:
+        # Chosen by SNI; the first is the default. Re-read when the files change.
+        - { cert_file: /etc/ferry/certs/example-com/tls.crt, key_file: /etc/ferry/certs/example-com/tls.key }
+        - { cert_file: /etc/ferry/certs/api/tls.crt, key_file: /etc/ferry/certs/api/tls.key }
+    limits:
+      max_request_headers_kb: 60
+      max_request_headers: 100
+      max_request_body_bytes: 10485760   # 10 MiB
+      h2_max_concurrent_streams: 100
+    timeouts:
+      header_read: 10s
+      h2_keep_alive: 20s
+    routes:
+      - name: api
+        hostnames: [api.example.com]
+        # Per client IP, per replica (the controller splits cluster-wide limits).
+        rate_limit: { requests: 100, per: 1s, burst: 200 }
+        rules:
+          - matches: [{ path: { value: /v1 } }]
+            timeouts: { request: 15s, backend_request: 5s, idle: 1m }
+            retry: { attempts: 2, codes: [502, 503, 504], backoff: 25ms }
+            backends: [{ cluster: api }]
+          - matches: [{ path: { value: /ws } }]
+            # WebSockets: the request timeout only covers the upgrade.
+            timeouts: { request: 10s }
+            backends: [{ cluster: realtime }]
+
+      - name: partners
+        hostnames: [partners.example.com]
+        rate_limit: { requests: 1000, per: 1m, key: { header: x-api-key } }
+        rules:
+          - backends: [{ cluster: partner-gateway }]
+
+clusters:
+  - name: api
+    lb_policy: p2c_ewma
+    connect_timeout: 1s
+    health_check: { interval: 5s, http: { path: /healthz } }
+    circuit_breakers: { max_connections: 2048, max_pending_requests: 512, max_requests: 4096, max_retries: 16 }
+    outlier_detection: { consecutive_5xx: 5, consecutive_gateway_failure: 3, base_ejection_time: 30s, max_ejection_percent: 30 }
+    retry_budget: { budget_percent: 20, min_retries_per_second: 10, ttl: 10s }
+    endpoints:
+      - address: 10.0.1.10:8080
+      - address: 10.0.1.11:8080
+      - address: 10.0.1.12:8080
+
+  - name: realtime
+    lb_policy: least_request
+    circuit_breakers: { max_requests: 20000 }   # each open WebSocket holds a slot
+    endpoints:
+      - address: 10.0.2.10:8080
+      - address: 10.0.2.11:8080
+
+  # A partner API that requires mutual TLS.
+  - name: partner-gateway
+    protocol: http2
+    tls:
+      sni: gateway.partner.example
+      ca_file: /etc/ferry/partner/ca.pem
+      client_certificate: { cert_file: /etc/ferry/partner/client.crt, key_file: /etc/ferry/partner/client.key }
+    health_check: { grpc: {} }
+    endpoints:
+      - address: 192.0.2.40:443

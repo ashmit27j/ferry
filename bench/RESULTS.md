@@ -125,3 +125,48 @@ set through `ArcSwap` (about 10 ns) before indexing it.
 
 The router is now flat in the number of routes: a hostname index (ADR 0009)
 replaced M0's linear scan.
+
+## M2 — 2026-10-13 (regression check, same Linux VM as M1)
+
+Same environment and script as M1 (`bench/exit/run-m1.sh`), with the M2 build:
+TLS, limits, timeouts, retries, rate limits, breakers and outlier detection
+compiled in, and `X-Forwarded-*` and `X-Request-Id` added to every request.
+
+| Run | Requests at 10k/s | Failed | p50 | p90 | p99 |
+| --- | --- | --- | --- | --- | --- |
+| Backend direct | 300,001 | 0 | 0.088 ms | 0.231 ms | 0.84 ms |
+| Through Ferry, steady | 299,825 | 0 | 0.163 ms | 0.211 ms | 5.2 ms |
+| **Through Ferry, kill + 66 reloads** | **599,966** | **0** | 0.162 ms | 0.211 ms | 2.4 ms |
+
+- The M1 exit criterion still holds: zero errors under kill and reload.
+- p50 rose about 11 µs over M1 (0.152 → 0.163 ms): the new per-request work
+  (edge headers, a generated request ID, limit and breaker checks).
+- k6 dropped 174 and 35 iterations in the two Ferry runs (0.06% and 0.006%),
+  a generator-side artefact as in M1; no request failed.
+- The p99 analysis from M1 applies unchanged (loopback wakeups in the VM);
+  per the plan owner, latency is re-measured on the Linux deployment target.
+
+### Micro-benchmarks (`cargo bench -p ferry-bench`, Windows, i7-12700F)
+
+| Benchmark | M1 | M2 |
+| --- | --- | --- |
+| `lb/round_robin_pick_16` | 23.9 ns | 38.0 ns |
+| `lb/weighted_round_robin_pick_16` | 37.8 ns | 56.0 ns |
+| `lb/least_request_pick_16` | 20.7 ns | 20.8 ns |
+| `lb/p2c_ewma_pick_16` | 71.7 ns | 71.8 ns |
+| `lb/maglev_pick_16` | 16.9 ns | 16.8 ns |
+| `lb/backend_split_pick` | 21.2 ns | 29.3 ns |
+| `lb/retry_budget_deposit` (new) | — | 35.7 ns |
+| `lb/retry_budget_withdraw` (new) | — | 35.3 ns |
+| `lb/breaker_acquire_release` (new) | — | 15.8 ns |
+| `edge/proxy_protocol_v1_parse` (new) | — | 22.5 ns |
+| `edge/proxy_protocol_v2_parse` (new) | — | 6.1 ns |
+| `router/100_routes_prefix_hit` | 43.7 ns | 45.2 ns |
+| `router/1000_routes_prefix_hit` | 44.5 ns | 43.9 ns |
+| `config/parse_validate_100_routes` | 2.44 ms | 2.44 ms |
+
+The round-robin, weighted and backend-split picks read 30–50% slower than in
+M1, but `lb/backend_split_pick` exercises `WeightedSelector`, whose code did not
+change in M2. Treat those three as run-to-run noise on a desktop machine (no
+CPU pinning, turbo enabled), not a regression; the gate on a dedicated Linux
+host will settle it.

@@ -6,11 +6,13 @@ Ferry terminates TLS and proxies HTTP/1.1, HTTP/2, gRPC and WebSockets to backen
 pods. It is configured through the Kubernetes Gateway API and runs on AWS EKS
 behind a Network Load Balancer.
 
-> **Status: M1 (core proxy).** HTTP/1.1 and h2c serving and proxying (including
-> gRPC to h2c upstreams), Gateway API matching and filters, five load-balancing
-> policies, active HTTP and gRPC health checks, and hot reload from a file.
-> TLS, timeouts, retries, metrics and the Kubernetes controller are planned for
-> M2–M5. See [`CLAUDE.md`](CLAUDE.md) for milestone status.
+> **Status: M2 (TLS and resilience).** TLS termination (SNI, hot certificate
+> rotation) and upstream mTLS; HTTP/1.1, HTTP/2, gRPC and WebSocket proxying;
+> Gateway API matching and filters; five load-balancing policies; health checks
+> and outlier ejection; timeouts, budgeted retries, circuit breakers and rate
+> limits; PROXY protocol; request limits and HTTP/2 attack defences; zero-drop
+> rolling restarts. Metrics and the Kubernetes controller are planned for M3–M4.
+> See [`CLAUDE.md`](CLAUDE.md) for milestone status.
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Helvetica Neue, Arial", "primaryColor": "#ffffff", "primaryTextColor": "#171717", "primaryBorderColor": "#dfdfdf", "lineColor": "#707070", "secondaryColor": "#fafafa", "tertiaryColor": "#ffffff"}}}%%
@@ -42,7 +44,8 @@ curl -s http://127.0.0.1:8080/hello
 
 Edit `examples/hello.yaml` while the proxy runs and it reloads within a second;
 an invalid edit is logged and ignored. [`examples/gateway.yaml`](examples/gateway.yaml)
-shows every routing, balancing and health-check option.
+shows every routing, balancing and health-check option, and
+[`examples/edge.yaml`](examples/edge.yaml) every TLS, limit and resilience one.
 
 Validate a config without running it, or print its JSON Schema:
 
