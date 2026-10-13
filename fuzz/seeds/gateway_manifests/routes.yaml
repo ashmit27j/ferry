@@ -1,0 +1,118 @@
+apiVersion: v1
+kind: Namespace
+metadata: { name: infra, labels: { gateway-conformance: infra } }
+---
+kind: Namespace
+metadata: { name: web, labels: { gateway-conformance: backend } }
+---
+kind: Namespace
+metadata: { name: other }
+---
+kind: GatewayClass
+metadata: { name: ferry, generation: 1 }
+spec: { controllerName: gateway.ferry.dev/controller }
+---
+kind: GatewayClass
+metadata: { name: someone-else }
+spec: { controllerName: example.com/other }
+---
+kind: Gateway
+metadata: { name: same-namespace, namespace: infra, generation: 2 }
+spec:
+  gatewayClassName: ferry
+  listeners:
+    - { name: http, port: 80, protocol: HTTP, allowedRoutes: { namespaces: { from: Same } } }
+---
+kind: Gateway
+metadata: { name: all-namespaces, namespace: infra }
+spec:
+  gatewayClassName: ferry
+  listeners:
+    - { name: http, port: 80, protocol: HTTP, allowedRoutes: { namespaces: { from: All } } }
+---
+kind: Gateway
+metadata: { name: backend-namespaces, namespace: infra }
+spec:
+  gatewayClassName: ferry
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector: { matchLabels: { gateway-conformance: backend } }
+---
+kind: Gateway
+metadata: { name: foreign, namespace: infra }
+spec:
+  gatewayClassName: someone-else
+  listeners: [{ name: http, port: 80, protocol: HTTP }]
+---
+kind: Service
+metadata: { name: infra-backend-v1, namespace: infra }
+spec:
+  ports:
+    - { name: first-port, port: 8080, targetPort: 3000 }
+    - { name: second-port, port: 8081, targetPort: 3001, appProtocol: kubernetes.io/h2c }
+---
+kind: EndpointSlice
+metadata: { name: v1-a, namespace: infra, labels: { kubernetes.io/service-name: infra-backend-v1 } }
+addressType: IPv4
+ports: [{ name: first-port, port: 3000 }, { name: second-port, port: 3001 }]
+endpoints:
+  - { addresses: [10.0.0.1], conditions: { ready: true } }
+  - { addresses: [10.0.0.2] }
+  - { addresses: [10.0.0.9], conditions: { ready: false } }
+---
+kind: EndpointSlice
+metadata: { name: v1-b, namespace: infra, labels: { kubernetes.io/service-name: infra-backend-v1 } }
+addressType: IPv4
+ports: [{ name: first-port, port: 3000 }]
+endpoints: [{ addresses: [10.0.0.1, 10.0.0.3] }]
+---
+kind: Service
+metadata: { name: web-backend, namespace: web }
+spec: { ports: [{ port: 8080, targetPort: 3000 }] }
+---
+kind: EndpointSlice
+metadata: { name: wb, namespace: web, labels: { kubernetes.io/service-name: web-backend } }
+addressType: IPv4
+ports: [{ port: 3000 }]
+endpoints: [{ addresses: [10.1.0.1] }]
+---
+kind: HTTPRoute
+metadata: { name: r, namespace: web }
+spec:
+  parentRefs: [{ name: all-namespaces, namespace: infra }]
+  hostnames: [example.com]
+  rules:
+    - matches: [{ path: { type: PathPrefix, value: /api } , headers: [{ name: x-v, value: "2" }] }]
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier: { set: [{ name: x-a, value: b }] }
+      backendRefs: [{ name: web-backend, port: 8080, weight: 3 }, { name: missing, port: 80 }]
+      timeouts: { request: 10s }
+---
+kind: GRPCRoute
+metadata: { name: g, namespace: web }
+spec:
+  parentRefs: [{ name: all-namespaces, namespace: infra }]
+  rules:
+    - matches: [{ method: { service: echo.Echo, method: Say } }]
+      backendRefs: [{ name: web-backend, port: 8080 }]
+---
+kind: ReferenceGrant
+metadata: { name: allow, namespace: other }
+spec:
+  from: [{ group: gateway.networking.k8s.io, kind: HTTPRoute, namespace: web }]
+  to: [{ group: "", kind: Service }]
+---
+apiVersion: gateway.ferry.dev/v1alpha1
+kind: FerryPolicy
+metadata: { name: p, namespace: web }
+spec:
+  targetRefs: [{ group: gateway.networking.k8s.io, kind: HTTPRoute, name: r }]
+  rateLimit: { requests: 10, per: 1s }
+  retry: { attempts: 2, codes: [503] }
+  outlierDetection: { consecutive5xx: 3 }
