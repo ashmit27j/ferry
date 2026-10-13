@@ -12,9 +12,11 @@ publish.workspace = true
 axum = { workspace = true, features = ["tokio", "http1", "json"] }
 ferry-api.workspace = true
 ferry-config.workspace = true
+ferry-telemetry.workspace = true
 futures-util.workspace = true
 k8s-openapi.workspace = true
 kube.workspace = true
+prometheus-client.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 schemars.workspace = true

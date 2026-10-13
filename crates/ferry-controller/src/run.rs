@@ -23,6 +23,7 @@ use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
 use k8s_openapi::api::coordination::v1::Lease;
 use k8s_openapi::api::core::v1::{Namespace, Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
+use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use k8s_openapi::jiff::Timestamp;
@@ -41,6 +42,7 @@ use crate::gateway_api::gateways::Gateway;
 use crate::gateway_api::grpcroutes::GrpcRoute;
 use crate::gateway_api::httproutes::HttpRoute;
 use crate::gateway_api::referencegrants::ReferenceGrant;
+use crate::metrics::{ControllerMetrics, ControllerStats, WriteOp};
 use crate::policy::FerryPolicy;
 use crate::provision::{self, GATEWAY_ANNOTATION, MANAGED_BY, MANAGED_BY_LABEL, ProxyTemplate};
 use crate::server::{self, Hub, TlsFiles};
@@ -306,6 +308,13 @@ pub async fn run(
     let hub = Hub::new();
     let synced = Arc::new(AtomicBool::new(false));
     let (leader_tx, leader_rx) = watch::channel(!opts.leader_election);
+    let stats = Arc::new(ControllerStats::default());
+    let metrics = Arc::new(ControllerMetrics::new(
+        Arc::clone(&hub),
+        Arc::clone(&stats),
+        Arc::clone(&synced),
+        leader_rx.clone(),
+    ));
 
     let snapshot_listener = tokio::net::TcpListener::bind(opts.snapshot_address)
         .await
@@ -324,6 +333,7 @@ pub async fn run(
         Arc::clone(&hub),
         Arc::clone(&synced),
         leader_rx.clone(),
+        metrics,
         stop.clone(),
     ));
     let election = opts.leader_election.then(|| {
@@ -338,18 +348,28 @@ pub async fn run(
 
     let stores = Stores::start(&client, &opts.namespace, &notify, &stop);
     let reconciler = {
-        let (client, opts, hub, synced, stop) = (
+        let (client, opts, hub, synced, stop, stats) = (
             client.clone(),
             opts.clone(),
             Arc::clone(&hub),
             Arc::clone(&synced),
             stop.clone(),
+            Arc::clone(&stats),
         );
         tokio::spawn(async move {
             stores.wait_until_ready().await;
             synced.store(true, Ordering::Relaxed);
             info!("caches synced; reconciling");
-            reconcile_loop(&client, &opts, &stores, &hub, &notify, leader_rx, &stop).await;
+            let r = Reconciler {
+                client: &client,
+                opts: &opts,
+                stores: &stores,
+                hub: &hub,
+                notify: &notify,
+                stop: &stop,
+                stats: &stats,
+            };
+            reconcile_loop(r, leader_rx).await;
         })
     };
 
@@ -366,28 +386,43 @@ pub async fn run(
     }
 }
 
-async fn reconcile_loop(
-    client: &Client,
-    opts: &Options,
-    stores: &Stores,
-    hub: &Hub,
-    notify: &Notify,
-    mut leader: watch::Receiver<bool>,
-    stop: &CancellationToken,
-) {
+/// What the reconcile loop reads and writes.
+struct Reconciler<'a> {
+    client: &'a Client,
+    opts: &'a Options,
+    stores: &'a Stores,
+    hub: &'a Hub,
+    notify: &'a Notify,
+    stop: &'a CancellationToken,
+    stats: &'a ControllerStats,
+}
+
+async fn reconcile_loop(r: Reconciler<'_>, mut leader: watch::Receiver<bool>) {
+    let Reconciler {
+        client,
+        opts,
+        stores,
+        hub,
+        notify,
+        stop,
+        stats,
+    } = r;
     let settings = Settings {
         controller_name: opts.controller_name.clone(),
         proxy_protocol: opts.template.proxy_protocol,
     };
     let mut applied = Applied::default();
     loop {
+        let started = tokio::time::Instant::now();
         let world = stores.world(&opts.namespace);
         let t = translate(&world, &settings);
         publish(hub, &t);
         if *leader.borrow_and_update() {
-            write_statuses(client, &world, &t, &opts.controller_name).await;
-            provision(client, opts, &world, &t, &mut applied).await;
+            write_statuses(client, &world, &t, &opts.controller_name, stats).await;
+            provision(client, opts, &world, &t, &mut applied, stats).await;
         }
+        let invalid = t.gateways.values().filter(|g| !g.valid).count();
+        stats.reconciled(started.elapsed(), invalid);
         tokio::select! {
             () = stop.cancelled() => return,
             () = notify.notified() => {}
@@ -422,8 +457,13 @@ fn now() -> Time {
     Time(Timestamp::from_second(Timestamp::now().as_second()).unwrap_or_else(|_| Timestamp::now()))
 }
 
-async fn patch_status<K>(api: Api<K>, name: &str, status: Value, resource_version: Option<String>)
-where
+async fn patch_status<K>(
+    stats: &ControllerStats,
+    api: Api<K>,
+    name: &str,
+    status: Value,
+    resource_version: Option<String>,
+) where
     K: Resource + Clone + DeserializeOwned + Debug,
 {
     let mut body = json!({ "status": status });
@@ -440,7 +480,10 @@ where
         Err(kube::Error::Api(e)) if e.code == 409 => {
             debug!(name, "status conflict; retrying next pass")
         }
-        Err(e) => warn!(kind = std::any::type_name::<K>(), name, error = %e, "cannot write status"),
+        Err(e) => {
+            stats.write_failed(WriteOp::Status);
+            warn!(kind = std::any::type_name::<K>(), name, error = %e, "cannot write status");
+        }
     }
 }
 
@@ -449,14 +492,27 @@ fn status_of<T: serde::Serialize>(s: Option<&T>) -> Value {
         .unwrap_or(Value::Null)
 }
 
-async fn write_statuses(client: &Client, world: &World, t: &Translation, controller: &str) {
+async fn write_statuses(
+    client: &Client,
+    world: &World,
+    t: &Translation,
+    controller: &str,
+    stats: &ControllerStats,
+) {
     let now = now();
     for (name, desired) in &t.classes {
         let Some(gc) = world.gateway_classes.get(name) else {
             continue;
         };
         if let Some(s) = status::class(&status_of(gc.status.as_ref()), desired, &now) {
-            patch_status(Api::<GatewayClass>::all(client.clone()), name, s, None).await;
+            patch_status(
+                stats,
+                Api::<GatewayClass>::all(client.clone()),
+                name,
+                s,
+                None,
+            )
+            .await;
         }
     }
     for (key, desired) in &t.gateways {
@@ -465,6 +521,7 @@ async fn write_statuses(client: &Client, world: &World, t: &Translation, control
         };
         if let Some(s) = status::gateway(&status_of(gw.status.as_ref()), desired, &now) {
             patch_status(
+                stats,
                 Api::<Gateway>::namespaced(client.clone(), &key.namespace),
                 &key.name,
                 s,
@@ -483,7 +540,7 @@ async fn write_statuses(client: &Client, world: &World, t: &Translation, control
                     status::route(&status_of(r.status.as_ref()), desired, controller, &now)
                 {
                     let api = Api::<HttpRoute>::namespaced(client.clone(), &key.namespace);
-                    patch_status(api, &key.name, s, r.resource_version()).await;
+                    patch_status(stats, api, &key.name, s, r.resource_version()).await;
                 }
             }
             RouteKind::Grpc => {
@@ -494,7 +551,7 @@ async fn write_statuses(client: &Client, world: &World, t: &Translation, control
                     status::route(&status_of(r.status.as_ref()), desired, controller, &now)
                 {
                     let api = Api::<GrpcRoute>::namespaced(client.clone(), &key.namespace);
-                    patch_status(api, &key.name, s, r.resource_version()).await;
+                    patch_status(stats, api, &key.name, s, r.resource_version()).await;
                 }
             }
         }
@@ -505,6 +562,7 @@ async fn write_statuses(client: &Client, world: &World, t: &Translation, control
         };
         if let Some(s) = status::policy(&status_of(p.status.as_ref()), desired, &now) {
             patch_status(
+                stats,
                 Api::<FerryPolicy>::namespaced(client.clone(), &key.namespace),
                 &key.name,
                 s,
@@ -536,11 +594,15 @@ async fn apply_doc(client: &Client, ns: &str, doc: &Value) -> Result<(), kube::E
             .patch(name, &params, &patch)
             .await
             .map(drop),
+        "NetworkPolicy" => Api::<NetworkPolicy>::namespaced(client.clone(), ns)
+            .patch(name, &params, &patch)
+            .await
+            .map(drop),
         _ => Ok(()),
     }
 }
 
-async fn delete(client: &Client, ns: &str, kind: &str, name: &str) {
+async fn delete(client: &Client, ns: &str, kind: &str, name: &str, stats: &ControllerStats) {
     let dp = DeleteParams::default();
     let result = match kind {
         "Deployment" => Api::<Deployment>::namespaced(client.clone(), ns)
@@ -559,20 +621,28 @@ async fn delete(client: &Client, ns: &str, kind: &str, name: &str) {
             .delete(name, &dp)
             .await
             .map(drop),
+        "NetworkPolicy" => Api::<NetworkPolicy>::namespaced(client.clone(), ns)
+            .delete(name, &dp)
+            .await
+            .map(drop),
         _ => Ok(()),
     };
     match result {
         Ok(()) => info!(kind, name, "deleted"),
         Err(kube::Error::Api(e)) if e.code == 404 => {}
-        Err(e) => warn!(kind, name, error = %e, "cannot delete"),
+        Err(e) => {
+            stats.write_failed(WriteOp::Delete);
+            warn!(kind, name, error = %e, "cannot delete");
+        }
     }
 }
 
-const FLEET_KINDS: [&str; 4] = [
+const FLEET_KINDS: [&str; 5] = [
     "Deployment",
     "Service",
     "PodDisruptionBudget",
     "HorizontalPodAutoscaler",
+    "NetworkPolicy",
 ];
 
 /// Applies every accepted Gateway's fleet and removes fleets (and parts of
@@ -583,6 +653,7 @@ async fn provision(
     world: &World,
     t: &Translation,
     applied: &mut Applied,
+    stats: &ControllerStats,
 ) {
     let ns = &opts.namespace;
     let mut wanted: BTreeSet<(String, String)> = BTreeSet::new();
@@ -617,7 +688,10 @@ async fn provision(
                     debug!(kind = %id.0, name = %id.1, "applied");
                     applied.docs.insert(id, (doc, tokio::time::Instant::now()));
                 }
-                Err(e) => warn!(kind = %id.0, name = %id.1, error = %e, "cannot apply"),
+                Err(e) => {
+                    stats.write_failed(WriteOp::Apply);
+                    warn!(kind = %id.0, name = %id.1, error = %e, "cannot apply");
+                }
             }
         }
     }
@@ -641,21 +715,23 @@ async fn provision(
         }
     }
     for (kind, name) in stale {
-        delete(client, ns, &kind, &name).await;
+        delete(client, ns, &kind, &name, stats).await;
         applied.docs.remove(&(kind, name));
     }
 }
 
-/// `/healthz`, `/readyz` (caches synced) and `/debug/proxies`.
+/// `/healthz`, `/readyz` (caches synced), `/metrics` and `/debug/proxies`.
 async fn admin(
     listener: tokio::net::TcpListener,
     hub: Arc<Hub>,
     synced: Arc<AtomicBool>,
     leader: watch::Receiver<bool>,
+    metrics: Arc<ControllerMetrics>,
     stop: CancellationToken,
 ) {
     use axum::Router;
     use axum::http::StatusCode;
+    use axum::response::IntoResponse;
     use axum::routing::get;
     let app = Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
@@ -668,6 +744,27 @@ async fn admin(
                         (StatusCode::OK, "ready\n")
                     } else {
                         (StatusCode::SERVICE_UNAVAILABLE, "syncing caches\n")
+                    }
+                }
+            }),
+        )
+        .route(
+            "/metrics",
+            get(move || {
+                let metrics = Arc::clone(&metrics);
+                async move {
+                    // procfs reads block.
+                    match tokio::task::spawn_blocking(move || metrics.encode()).await {
+                        Ok(Ok(text)) => (
+                            StatusCode::OK,
+                            [(
+                                axum::http::header::CONTENT_TYPE,
+                                "application/openmetrics-text; version=1.0.0; charset=utf-8",
+                            )],
+                            text,
+                        )
+                            .into_response(),
+                        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
                     }
                 }
             }),

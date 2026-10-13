@@ -18,6 +18,7 @@
 pub mod certgen;
 pub mod gateway_api;
 pub mod leader;
+pub mod metrics;
 pub mod policy;
 pub mod provision;
 pub mod run;

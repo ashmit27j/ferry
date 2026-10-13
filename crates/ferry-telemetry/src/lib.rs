@@ -12,7 +12,7 @@
 pub mod access_log;
 pub mod histogram;
 pub mod metrics;
-mod process;
+pub mod process;
 pub mod trace;
 
 use std::io::IsTerminal;

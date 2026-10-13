@@ -59,6 +59,8 @@ pub struct Hub {
     channels: Mutex<HashMap<ObjKey, watch::Sender<Option<Arc<Published>>>>>,
     last_version: Mutex<u64>,
     proxies: Mutex<BTreeMap<String, ProxyView>>,
+    /// Rejections received, by Gateway (`namespace/name`).
+    nacks: Mutex<BTreeMap<String, u64>>,
 }
 
 impl Hub {
@@ -149,6 +151,25 @@ impl Hub {
         self.proxies().clone()
     }
 
+    /// The version currently published for each Gateway.
+    #[must_use]
+    pub fn published_versions(&self) -> BTreeMap<String, u64> {
+        self.channels()
+            .iter()
+            .filter_map(|(k, tx)| tx.borrow().as_ref().map(|p| (k.to_string(), p.version)))
+            .collect()
+    }
+
+    /// Rejections received so far, by Gateway. Counts survive the Gateway's
+    /// proxies disconnecting, like any Prometheus counter.
+    #[must_use]
+    pub fn nacks(&self) -> BTreeMap<String, u64> {
+        self.nacks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     fn ack(&self, proxy: &str, gateway: &ObjKey, ack: &SnapshotAck) {
         let mut proxies = self.proxies();
         let view = proxies
@@ -164,6 +185,12 @@ impl Hub {
             debug!(proxy, %gateway, version = ack.version, "snapshot acknowledged");
         } else {
             view.last_error = Some(ack.error.clone());
+            *self
+                .nacks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(gateway.to_string())
+                .or_default() += 1;
             warn!(proxy, %gateway, nonce = %ack.nonce, error = %ack.error,
                 "proxy rejected a snapshot; it keeps serving version {}", ack.version);
         }
@@ -386,7 +413,9 @@ mod tests {
             (view.acked_version, view.last_error.as_deref()),
             (5, Some("bad"))
         );
+        assert_eq!(hub.nacks()["ns/gw"], 1);
         hub.disconnect("p");
         assert!(hub.proxy_views().is_empty());
+        assert_eq!(hub.nacks()["ns/gw"], 1, "counters outlive streams");
     }
 }
