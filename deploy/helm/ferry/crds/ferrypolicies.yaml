@@ -1,0 +1,537 @@
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "ferrypolicies.gateway.ferry.dev"
+  },
+  "spec": {
+    "group": "gateway.ferry.dev",
+    "names": {
+      "kind": "FerryPolicy",
+      "plural": "ferrypolicies",
+      "shortNames": [
+        "fp"
+      ],
+      "singular": "ferrypolicy"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [
+          {
+            "jsonPath": ".status.conditions[?(@.type==\"Accepted\")].status",
+            "name": "Accepted",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".metadata.creationTimestamp",
+            "name": "Age",
+            "type": "date"
+          }
+        ],
+        "name": "v1alpha1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "Auto-generated derived type for FerryPolicySpec via `CustomResource`",
+            "properties": {
+              "spec": {
+                "description": "Ferry's settings for a Gateway, route or Service.",
+                "properties": {
+                  "backendTLS": {
+                    "description": "Service targets: TLS (optionally mutual) to the endpoints.",
+                    "nullable": true,
+                    "properties": {
+                      "caSecret": {
+                        "description": "A `kubernetes.io/tls` Secret whose `ca.crt` lists trusted CAs. Absent\ntrusts the Mozilla roots.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "clientCertificateSecret": {
+                        "description": "A `kubernetes.io/tls` Secret with the client certificate for mTLS.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "sni": {
+                        "description": "Server name to send and verify (default: the cluster name).",
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "circuitBreakers": {
+                    "description": "Service targets: concurrency limits.",
+                    "nullable": true,
+                    "properties": {
+                      "maxConnections": {
+                        "description": "Most upstream connections per proxy (default 1024).",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "maxPendingRequests": {
+                        "description": "Most requests waiting for a connection (default 1024).",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "maxRequests": {
+                        "description": "Most requests in flight (default 1024).",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "maxRetries": {
+                        "description": "Most retries in flight (default 3).",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "connectTimeout": {
+                    "description": "Service targets: upstream TCP connect timeout, e.g. `2s`.",
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "healthCheck": {
+                    "description": "Service targets: active health checking.",
+                    "nullable": true,
+                    "properties": {
+                      "grpc": {
+                        "description": "`grpc.health.v1` check.",
+                        "nullable": true,
+                        "properties": {
+                          "authority": {
+                            "description": "`:authority` (default: the cluster name).",
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "service": {
+                            "default": "",
+                            "description": "Service name; empty asks about the server.",
+                            "type": "string"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "healthyThreshold": {
+                        "description": "Successes that mark it healthy again (default 2).",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "http": {
+                        "description": "HTTP GET check.",
+                        "nullable": true,
+                        "properties": {
+                          "expectedStatuses": {
+                            "description": "Healthy statuses (default `[200]`).",
+                            "items": {
+                              "format": "uint16",
+                              "maximum": 65535.0,
+                              "minimum": 0.0,
+                              "type": "integer"
+                            },
+                            "type": "array"
+                          },
+                          "host": {
+                            "description": "Host header (default: the cluster name).",
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "path": {
+                            "description": "Path, e.g. `/healthz`.",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "path"
+                        ],
+                        "type": "object"
+                      },
+                      "interval": {
+                        "description": "Time between checks (default `5s`).",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "timeout": {
+                        "description": "Time allowed per check (default `1s`).",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "unhealthyThreshold": {
+                        "description": "Failures that mark an endpoint unhealthy (default 3).",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "listener": {
+                    "description": "Gateway targets: settings of every listener.",
+                    "nullable": true,
+                    "properties": {
+                      "h2KeepAlive": {
+                        "description": "HTTP/2 keep-alive ping interval, e.g. `20s`.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "h2MaxConcurrentStreams": {
+                        "description": "Most concurrent HTTP/2 streams per connection (default 100).",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "headerReadTimeout": {
+                        "description": "Time allowed for request headers, e.g. `30s`.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "maxRequestBodyBytes": {
+                        "description": "Largest request body in bytes; larger requests get 413.",
+                        "format": "uint64",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "maxRequestHeaders": {
+                        "description": "Most request headers (1-1024, default 100).",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "maxRequestHeadersKb": {
+                        "description": "Largest request header block in KiB (8-1024, default 60).",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "tlsMinVersion": {
+                        "description": "Lowest TLS version accepted on HTTPS listeners: `\"1.2\"` or `\"1.3\"`.",
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "loadBalancer": {
+                    "description": "Service targets: how requests are spread across endpoints.",
+                    "nullable": true,
+                    "properties": {
+                      "hash": {
+                        "description": "Required for `Maglev`, rejected otherwise. Exactly one field.",
+                        "nullable": true,
+                        "properties": {
+                          "cookie": {
+                            "description": "Hash this cookie, generating it when absent.",
+                            "nullable": true,
+                            "properties": {
+                              "name": {
+                                "description": "Cookie name.",
+                                "type": "string"
+                              },
+                              "path": {
+                                "description": "Path of a generated cookie (default `/`).",
+                                "nullable": true,
+                                "type": "string"
+                              },
+                              "ttl": {
+                                "description": "Max-Age of a generated cookie; absent makes it a session cookie.",
+                                "nullable": true,
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "name"
+                            ],
+                            "type": "object"
+                          },
+                          "header": {
+                            "description": "Hash this request header.",
+                            "nullable": true,
+                            "type": "string"
+                          },
+                          "sourceIp": {
+                            "description": "Hash the client IP.",
+                            "type": "boolean"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "kind": {
+                        "default": "RoundRobin",
+                        "description": "The policy.",
+                        "enum": [
+                          "RoundRobin",
+                          "WeightedRoundRobin",
+                          "LeastRequest",
+                          "P2cEwma",
+                          "Maglev"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "outlierDetection": {
+                    "description": "Service targets: passive ejection of failing endpoints.",
+                    "nullable": true,
+                    "properties": {
+                      "baseEjectionTime": {
+                        "description": "First ejection length (default `30s`).",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "consecutive5xx": {
+                        "description": "Consecutive 5xx that eject (default 5).",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "consecutiveGatewayFailure": {
+                        "description": "Consecutive gateway failures that eject (default 5).",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "maxEjectionPercent": {
+                        "description": "Most endpoints ejected at once, in percent (default 10).",
+                        "format": "uint8",
+                        "maximum": 255.0,
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "maxEjectionTime": {
+                        "description": "Longest ejection (default `300s`).",
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "panicThreshold": {
+                    "description": "Service targets: below this percentage of healthy endpoints, balance\nacross all of them (0-100, default 50).",
+                    "format": "uint8",
+                    "maximum": 100.0,
+                    "minimum": 0.0,
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "rateLimit": {
+                    "description": "Route targets: a cluster-wide token bucket, divided between the ready\nproxy replicas of each Gateway.",
+                    "nullable": true,
+                    "properties": {
+                      "burst": {
+                        "description": "Bucket size across all replicas. Defaults to `requests`.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "keyHeader": {
+                        "description": "Request header whose value keys the buckets. Absent keys by client IP.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "per": {
+                        "description": "Refill period, e.g. `1s` or `1m`.",
+                        "type": "string"
+                      },
+                      "requests": {
+                        "description": "Requests allowed per `per` across all proxy replicas.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "per",
+                      "requests"
+                    ],
+                    "type": "object"
+                  },
+                  "retry": {
+                    "description": "Route targets: retries on failures that may have reached a backend.",
+                    "nullable": true,
+                    "properties": {
+                      "attempts": {
+                        "description": "Most retries after the first attempt (0-10, default 2).",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "backoff": {
+                        "description": "Base backoff, doubled per retry with full jitter (default `25ms`).",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "codes": {
+                        "description": "Statuses that trigger a retry (500-599; default 502, 503, 504).",
+                        "items": {
+                          "format": "uint16",
+                          "maximum": 65535.0,
+                          "minimum": 0.0,
+                          "type": "integer"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "retryBudget": {
+                    "description": "Service targets: cap on retries relative to traffic.",
+                    "nullable": true,
+                    "properties": {
+                      "budgetPercent": {
+                        "description": "Retries as a percentage of requests (default 20).",
+                        "format": "uint8",
+                        "maximum": 255.0,
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "minRetriesPerSecond": {
+                        "description": "Retries always allowed per second (default 10).",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "ttl": {
+                        "description": "Counting window (default `10s`).",
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "targetRefs": {
+                    "description": "Objects in this namespace the policy applies to.",
+                    "items": {
+                      "description": "A reference to an object in the policy's namespace.",
+                      "properties": {
+                        "group": {
+                          "default": "",
+                          "description": "API group: `gateway.networking.k8s.io`, or `\"\"` for a Service.",
+                          "type": "string"
+                        },
+                        "kind": {
+                          "description": "`Gateway`, `HTTPRoute`, `GRPCRoute` or `Service`.",
+                          "type": "string"
+                        },
+                        "name": {
+                          "description": "Object name.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "name"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "timeouts": {
+                    "description": "Route targets: timeouts the Gateway API does not define.",
+                    "nullable": true,
+                    "properties": {
+                      "idle": {
+                        "description": "Longest silence on a request or response body (default `5m`).",
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "targetRefs"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "description": "FerryPolicy status.",
+                "nullable": true,
+                "properties": {
+                  "conditions": {
+                    "description": "`Accepted`: True when every target resolved and every field applies.",
+                    "items": {
+                      "properties": {
+                        "lastTransitionTime": {
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "observedGeneration": {
+                          "format": "int64",
+                          "type": "integer"
+                        },
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "True",
+                            "False",
+                            "Unknown"
+                          ],
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "lastTransitionTime",
+                        "message",
+                        "reason",
+                        "status",
+                        "type"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array",
+                    "x-kubernetes-list-map-keys": [
+                      "type"
+                    ],
+                    "x-kubernetes-list-type": "map"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "FerryPolicy",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {
+          "status": {}
+        }
+      }
+    ]
+  }
+}

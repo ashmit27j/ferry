@@ -1,0 +1,172 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ferry.proxy" . }}-template
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+data:
+  # How the controller deploys each Gateway's proxies (ProxyTemplate).
+  proxy.yaml: |
+    image: {{ include "ferry.image" . | quote }}
+    imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
+    imagePullSecrets: {{ .Values.imagePullSecrets | default list | toJson }}
+    replicas: {{ .Values.proxy.replicas }}
+    {{- if .Values.proxy.autoscaling.enabled }}
+    autoscaling:
+      minReplicas: {{ .Values.proxy.autoscaling.minReplicas }}
+      maxReplicas: {{ .Values.proxy.autoscaling.maxReplicas }}
+      targetCpuUtilization: {{ .Values.proxy.autoscaling.targetCPUUtilizationPercentage }}
+    {{- end }}
+    {{- with .Values.proxy.podDisruptionBudget }}
+    maxUnavailable: {{ .maxUnavailable }}
+    {{- end }}
+    resources: {{ .Values.proxy.resources | toJson }}
+    podAnnotations: {{ .Values.proxy.podAnnotations | toJson }}
+    nodeSelector: {{ .Values.proxy.nodeSelector | toJson }}
+    tolerations: {{ .Values.proxy.tolerations | toJson }}
+    topologySpread: {{ .Values.proxy.topologySpread }}
+    service:
+      type: {{ .Values.proxy.service.type | quote }}
+      annotations: {{ include "ferry.serviceAnnotations" . }}
+      {{- with .Values.proxy.service.externalTrafficPolicy }}
+      externalTrafficPolicy: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.proxy.service.loadBalancerClass }}
+      loadBalancerClass: {{ . | quote }}
+      {{- end }}
+    proxyProtocol: {{ .Values.proxy.proxyProtocol }}
+    drainDelaySecs: {{ .Values.proxy.drainDelaySeconds }}
+    drainTimeoutSecs: {{ .Values.proxy.drainTimeoutSeconds }}
+    logLevel: {{ .Values.proxy.logLevel | quote }}
+    accessLog: {{ .Values.proxy.accessLog | quote }}
+    {{- with .Values.proxy.otlpEndpoint }}
+    otlpEndpoint: {{ . | quote }}
+    {{- end }}
+    controllerUrl: "https://{{ include "ferry.controllerHost" . }}:18000"
+    controllerServerName: {{ include "ferry.controllerHost" . | quote }}
+    tlsSecret: {{ include "ferry.proxyTLS" . | quote }}
+    serviceAccount: {{ include "ferry.proxy" . | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ferry.controller" . }}
+  labels:
+    app.kubernetes.io/name: ferry-controller
+    {{- include "ferry.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ferry-controller
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ferry-controller
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      annotations:
+        # Roll the controller when the proxy template changes.
+        checksum/proxy-template: {{ .Values.proxy | toJson | sha256sum }}
+        {{- with .Values.controller.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "ferry.controller" . }}
+      securityContext:
+        {{- include "ferry.podSecurity" . | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: ferry-controller
+                    app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: controller
+          image: {{ include "ferry.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - controller
+            - --controller-name={{ .Values.gatewayClass.controllerName }}
+            - --tls-dir=/etc/ferry/tls
+            - --proxy-template=/etc/ferry/template/proxy.yaml
+            {{- if eq (int .Values.controller.replicas) 1 }}
+            - --no-leader-election
+            {{- end }}
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: FERRY_LOG
+              value: {{ .Values.controller.logLevel | quote }}
+            - name: FERRY_LOG_FORMAT
+              value: json
+          ports:
+            - { name: snapshots, containerPort: 18000, protocol: TCP }
+            - { name: health, containerPort: 18001, protocol: TCP }
+          readinessProbe:
+            httpGet: { path: /readyz, port: health }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: health }
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+          securityContext:
+            {{- include "ferry.containerSecurity" . | nindent 12 }}
+          volumeMounts:
+            - { name: tls, mountPath: /etc/ferry/tls, readOnly: true }
+            - { name: template, mountPath: /etc/ferry/template, readOnly: true }
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ include "ferry.controllerTLS" . }}
+        - name: template
+          configMap:
+            name: {{ include "ferry.proxy" . }}-template
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ferry.controller" . }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ferry-controller
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - { name: grpc-snapshots, port: 18000, targetPort: snapshots, protocol: TCP }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "ferry.controller" . }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ferry-controller
+      app.kubernetes.io/instance: {{ .Release.Name }}

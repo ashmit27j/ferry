@@ -1,0 +1,92 @@
+# Ferry Helm values. The defaults target AWS EKS behind a Network Load
+# Balancer (AWS Load Balancer Controller, IP targets, PROXY protocol v2).
+# values-kind.yaml overrides them for a local kind cluster.
+
+image:
+  repository: ghcr.io/ashmit27j/ferry
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# The GatewayClass this release owns. Gateways that name it get a proxy
+# fleet in the release namespace.
+gatewayClass:
+  create: true
+  name: ferry
+  controllerName: gateway.ferry.dev/controller
+
+# Optionally create a Gateway, so `helm install` alone yields a working one.
+gateway:
+  create: false
+  name: ferry
+  # Namespace of the Gateway; defaults to the release namespace.
+  namespace: ""
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: All
+
+controller:
+  # Two replicas with Lease-based leader election: both serve snapshots,
+  # the leader writes status and provisions proxies.
+  replicas: 2
+  logLevel: info
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { memory: 512Mi }
+  nodeSelector: {}
+  tolerations: []
+  podAnnotations: {}
+
+proxy:
+  # Replicas per Gateway when autoscaling is off.
+  replicas: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    maxUnavailable: 1
+  resources:
+    requests: { cpu: 250m, memory: 64Mi }
+    limits: { memory: 512Mi }
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  # Spread each fleet across zones and nodes (best effort).
+  topologySpread: true
+  service:
+    type: LoadBalancer
+    externalTrafficPolicy: ""
+    loadBalancerClass: ""
+    # An AWS Network Load Balancer from the AWS Load Balancer Controller,
+    # with IP targets (pods registered directly) and, when proxyProtocol is
+    # on, PROXY protocol v2 so the client address survives.
+    awsNlb:
+      enabled: true
+      scheme: internet-facing
+      deregistrationDelaySeconds: 30
+    # Extra annotations, merged over the NLB ones.
+    annotations: {}
+  # Proxies expect a PROXY v2 header on every connection (the NLB sends one).
+  proxyProtocol: true
+  # Keep accepting for this long after SIGTERM while the NLB deregisters the
+  # pod; longer than deregistrationDelaySeconds above.
+  drainDelaySeconds: 35
+  drainTimeoutSeconds: 30
+  logLevel: info
+  # stdout, stderr or off.
+  accessLog: "off"
+  # OTLP/gRPC endpoint for traces, e.g. http://otel-collector.observability:4317.
+  otlpEndpoint: ""
+
+metrics:
+  # A PodMonitor for kube-prometheus-stack (proxies serve /metrics on 19001).
+  podMonitor:
+    enabled: true
+    interval: 15s

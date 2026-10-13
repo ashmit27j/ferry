@@ -1,0 +1,105 @@
+{{- /*
+Least privilege (ADR 0035):
+- cluster-wide, the controller only reads what it translates and writes the
+  status subresources of what it owns;
+- in the release namespace, it manages proxy fleets and its Lease;
+- proxies get no API access at all (automountServiceAccountToken: false).
+*/ -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "ferry.controller" . }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "ferry.proxy" . }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ferry.controller" . }}-{{ .Release.Namespace }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses", "gateways", "httproutes", "grpcroutes", "referencegrants"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses/status", "gateways/status", "httproutes/status", "grpcroutes/status"]
+    verbs: ["patch", "update"]
+  - apiGroups: ["gateway.ferry.dev"]
+    resources: ["ferrypolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.ferry.dev"]
+    resources: ["ferrypolicies/status"]
+    verbs: ["patch", "update"]
+  - apiGroups: [""]
+    resources: ["services", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  # Listener certificates. The controller lists only kubernetes.io/tls
+  # Secrets (a field selector), but RBAC cannot express that.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "ferry.controller" . }}-{{ .Release.Namespace }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "ferry.controller" . }}-{{ .Release.Namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "ferry.controller" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "ferry.controller" . }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "patch", "update", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "create", "patch", "update", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "create", "patch", "update", "delete"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "ferry.controller" . }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "ferry.controller" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "ferry.controller" . }}
+    namespace: {{ .Release.Namespace }}

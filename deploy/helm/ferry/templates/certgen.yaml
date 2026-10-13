@@ -1,0 +1,95 @@
+{{- /*
+`ferry certgen` issues the CA and certificates of the controller-to-proxy
+snapshot stream (ADR 0033) before the controller starts, on install and on
+every upgrade (renewing them within 90 days of expiry). It runs as a hook
+with its own short-lived identity, which may only touch Secrets here.
+*/ -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "ferry.certgen" . }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "ferry.certgen" . }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "ferry.certgen" . }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "ferry.certgen" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "ferry.certgen" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "ferry.certgen" . }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ferry-certgen
+    spec:
+      serviceAccountName: {{ include "ferry.certgen" . }}
+      restartPolicy: Never
+      securityContext:
+        {{- include "ferry.podSecurity" . | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: certgen
+          image: {{ include "ferry.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - certgen
+            - --namespace={{ .Release.Namespace }}
+            - --controller-secret={{ include "ferry.controllerTLS" . }}
+            - --proxy-secret={{ include "ferry.proxyTLS" . }}
+            - --dns-name={{ include "ferry.controllerHost" . }}
+            - --dns-name={{ include "ferry.controller" . }}
+            - --dns-name={{ include "ferry.controller" . }}.{{ .Release.Namespace }}
+            - --dns-name={{ include "ferry.controllerHost" . }}.cluster.local
+          securityContext:
+            {{- include "ferry.containerSecurity" . | nindent 12 }}
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }

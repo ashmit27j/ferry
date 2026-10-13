@@ -1,0 +1,43 @@
+{{- if .Values.gatewayClass.create }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: {{ .Values.gatewayClass.name }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+spec:
+  controllerName: {{ .Values.gatewayClass.controllerName }}
+  description: Ferry L7 proxies, one fleet per Gateway
+{{- end }}
+{{- if .Values.gateway.create }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ .Values.gateway.name }}
+  namespace: {{ .Values.gateway.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+spec:
+  gatewayClassName: {{ .Values.gatewayClass.name }}
+  listeners:
+    {{- toYaml .Values.gateway.listeners | nindent 4 }}
+{{- end }}
+{{- if and .Values.metrics.podMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/PodMonitor") }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "ferry.proxy" . }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ferry-proxy
+      app.kubernetes.io/managed-by: ferry-controller
+  podMetricsEndpoints:
+    - port: admin
+      path: /metrics
+      interval: {{ .Values.metrics.podMonitor.interval }}
+{{- end }}

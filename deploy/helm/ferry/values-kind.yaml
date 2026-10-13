@@ -1,0 +1,31 @@
+# Overrides for a local kind cluster (bench/exit/run-m4.sh): the locally
+# built image, MetalLB for LoadBalancer addresses, no NLB, one proxy per
+# Gateway.
+image:
+  repository: ferry
+  tag: dev
+  pullPolicy: Never
+
+gateway:
+  create: true
+
+proxy:
+  replicas: 1
+  autoscaling:
+    enabled: false
+  resources:
+    requests: { cpu: 10m, memory: 16Mi }
+  service:
+    awsNlb:
+      enabled: false
+  proxyProtocol: false
+  drainDelaySeconds: 1
+  drainTimeoutSeconds: 10
+
+controller:
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+
+metrics:
+  podMonitor:
+    enabled: false

@@ -1,0 +1,15 @@
+apiVersion: v2
+name: ferry
+description: Ferry, a Kubernetes-native L7 load balancer implementing the Gateway API
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.32.0-0"
+home: https://github.com/ashmit27j/ferry
+sources:
+  - https://github.com/ashmit27j/ferry
+keywords:
+  - gateway-api
+  - load-balancer
+  - ingress
+  - grpc

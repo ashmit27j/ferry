@@ -1,0 +1,8 @@
+# The build context needs sources and the lockfile only.
+target/
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+.git/
+bench/exit/results/
+**/*.profraw
