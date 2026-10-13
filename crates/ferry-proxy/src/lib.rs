@@ -26,10 +26,12 @@ pub mod router;
 mod server;
 mod state;
 pub mod tls;
+mod tunnel;
 pub mod watch;
 
 pub use body::ProxyBody;
 pub use error::ProxyError;
 pub use forward::MAX_ATTEMPTS;
+pub use grpc::parse_timeout as parse_grpc_timeout;
 pub use router::Router;
 pub use server::{DEFAULT_DRAIN_TIMEOUT, Drain, Proxy, ReloadHandle};

@@ -42,19 +42,20 @@ pub(crate) fn is_grpc(headers: &HeaderMap) -> bool {
 
 /// Parses a `grpc-timeout` value: up to 8 digits and a unit (`H`, `M`, `S`,
 /// `m`, `u`, `n`), as in the gRPC HTTP/2 spec.
-pub(crate) fn parse_timeout(value: &str) -> Option<Duration> {
-    let (digits, unit) = value.split_at(value.len().checked_sub(1)?);
-    if digits.is_empty() || digits.len() > 8 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+pub fn parse_timeout(value: &str) -> Option<Duration> {
+    // Split on bytes: a multi-byte last character must not panic.
+    let (&unit, digits) = value.as_bytes().split_last()?;
+    if digits.is_empty() || digits.len() > 8 || !digits.iter().all(u8::is_ascii_digit) {
         return None;
     }
-    let n: u64 = digits.parse().ok()?;
+    let n: u64 = std::str::from_utf8(digits).ok()?.parse().ok()?;
     Some(match unit {
-        "H" => Duration::from_secs(n.checked_mul(3600)?),
-        "M" => Duration::from_secs(n.checked_mul(60)?),
-        "S" => Duration::from_secs(n),
-        "m" => Duration::from_millis(n),
-        "u" => Duration::from_micros(n),
-        "n" => Duration::from_nanos(n),
+        b'H' => Duration::from_secs(n.checked_mul(3600)?),
+        b'M' => Duration::from_secs(n.checked_mul(60)?),
+        b'S' => Duration::from_secs(n),
+        b'm' => Duration::from_millis(n),
+        b'u' => Duration::from_micros(n),
+        b'n' => Duration::from_nanos(n),
         _ => return None,
     })
 }
@@ -119,6 +120,10 @@ mod tests {
 
     #[test]
     fn parses_timeout_units() {
+        // Found by the header_values fuzz target: a multi-byte last
+        // character used to panic in split_at.
+        assert_eq!(parse_timeout("\u{22c}"), None);
+        assert_eq!(parse_timeout("5\u{22c}"), None);
         assert_eq!(parse_timeout("1H"), Some(Duration::from_secs(3600)));
         assert_eq!(parse_timeout("2M"), Some(Duration::from_secs(120)));
         assert_eq!(parse_timeout("3S"), Some(Duration::from_secs(3)));
