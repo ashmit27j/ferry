@@ -10,7 +10,8 @@
 #   m5-prom    .20  Prometheus, scraping Ferry every 5 s
 #   ws-flood   .31  holds WS_COUNT WebSockets through Ferry for the whole soak
 #   k6         .30  RATE req/s, run in SEGMENT-long pieces (k6 keeps every
-#                   sample in memory, so one 4-hour run would exhaust it)
+#                   sample in memory, so one 4-hour run would exhaust it;
+#                   each restart leaves a gap of a few seconds without load)
 # Chaos, repeating every 20 minutes (bench/exit/m5/chaos.sh): kill backend c
 # and restart it a minute later; 200 ms +-50 ms latency on b for 3 minutes;
 # 5% packet loss on a for 3 minutes (tc netem from a netshoot sidecar).
@@ -32,10 +33,12 @@ K6=grafana/k6:1.3.0
 PROM=prom/prometheus:v3.5.0
 DURATION=${DURATION:-4h}
 RATE=${RATE:-5000}
-SEGMENT=${SEGMENT:-600}
+SEGMENT=${SEGMENT:-300}
 WS_COUNT=${WS_COUNT:-10000}
 RELOAD_EVERY=${RELOAD_EVERY:-60}
-FERRY_CPUS=${FERRY_CPUS:-2}
+# Cores Ferry is pinned to (cpuset, as in the M1 exit test). A CPU quota
+# (--cpus) throttles in 100 ms periods and stalls Ferry in bursts.
+FERRY_CPUSET=${FERRY_CPUSET:-0}
 
 seconds() {
   case $1 in
@@ -76,8 +79,8 @@ for b in a b c; do
 done
 run m5-ws 172.30.5.14 -- /target/release/mock-backend --name ws --ws 0.0.0.0:9000
 
-echo "== ferry ($FERRY_CPUS CPUs)"
-run m5-ferry 172.30.5.10 --cpus "$FERRY_CPUS" -p 9901:9901 -e RELOAD_EVERY="$RELOAD_EVERY" \
+echo "== ferry (cores $FERRY_CPUSET)"
+run m5-ferry 172.30.5.10 --cpuset-cpus "$FERRY_CPUSET" -p 9901:9901 -e RELOAD_EVERY="$RELOAD_EVERY" \
   -v "$HERE:/m5:ro" -- bash /m5/ferry-env.sh
 for _ in $(seq 1 100); do
   docker exec m5-ferry bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080' 2>/dev/null && break

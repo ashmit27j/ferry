@@ -13,7 +13,9 @@ Checks:
   projected over 72 hours must stay under max(10% of the median, 16 MiB).
   Open file descriptors get the same treatment.
 - WebSockets: every socket opened and was still echoing at the end.
-- No dropped k6 iterations (offered load was really delivered).
+- k6 delivered the offered load: under 0.01% of iterations dropped. Chaos
+  (a killed backend stalls connects until it is ejected) makes k6 allocate
+  VUs mid-run, which drops a few iterations; the count is reported.
 
 Usage: m5-check.py --prometheus URL --start EPOCH --end EPOCH --k6 DIR
                    --ws FILE --rate N --out FILE
@@ -152,8 +154,10 @@ def main():
                    "ok": ws.get("alive_at_end") == ws.get("count") and ws.get("count", 0) > 0, **ws})
 
     k6 = k6_totals(a.k6)
-    checks.append({"name": "k6 delivered the offered load (no dropped iterations)",
-                   "ok": k6["dropped_iterations"] == 0, **k6})
+    offered = k6["requests"] + k6["dropped_iterations"]
+    k6["dropped_ratio"] = k6["dropped_iterations"] / offered if offered else None
+    checks.append({"name": "k6 delivered the offered load (< 0.01% dropped iterations)",
+                   "ok": offered > 0 and k6["dropped_iterations"] / offered < 1e-4, **k6})
 
     extra = {
         "duration_seconds": span,

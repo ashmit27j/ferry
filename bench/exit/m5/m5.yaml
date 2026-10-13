@@ -23,7 +23,8 @@ listeners:
 clusters:
   - name: app
     lb_policy: p2c_ewma
-    connect_timeout: 1s
+    # A killed container's address drops SYNs: fail fast and retry elsewhere.
+    connect_timeout: 250ms
     health_check:
       interval: 1s
       timeout: 500ms
