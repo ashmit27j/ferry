@@ -2,8 +2,8 @@
 # Runs inside the M4 runner container, attached to the kind network, with
 # the repo at /ferry and results in /out. See bench/exit/run-m4.sh.
 #
-# PHASES selects steps: setup (MetalLB, image, helm install), smoke,
-# conformance. Default: all three.
+# PHASES selects steps: setup (MetalLB, image, helm install), smoke, chaos
+# (M5: pod kills under load), conformance. Default: setup smoke conformance.
 set -euo pipefail
 CLUSTER=${CLUSTER:-ferry-m4}
 PHASES=${PHASES:-setup smoke conformance}
@@ -75,6 +75,65 @@ if has smoke; then
   kubectl -n smoke get ferrypolicy echo -o jsonpath='{range .status.conditions[*]}FerryPolicy {.type}={.status} ({.reason}){"\n"}{end}' | tee -a /out/m4-smoke.txt
   kubectl -n ferry-system get gateway ferry -o wide | tee -a /out/m4-smoke.txt
   echo "   smoke OK"
+fi
+
+if has chaos; then
+  # M5: pod kills under load. Three proxies behind the MetalLB address; a
+  # constant-rate client from outside the cluster; graceful deletes of
+  # proxy, controller (the leader) and backend pods, then, in a second
+  # window, one forced proxy kill (no drain), reported separately.
+  echo "== chaos: pod kills under load"
+  kubectl apply -f /ferry/bench/exit/m4/smoke.yaml >/dev/null
+  kubectl -n smoke rollout status deploy/echo --timeout=180s
+  helm upgrade ferry /ferry/deploy/helm/ferry -n ferry-system --reuse-values \
+    --set proxy.replicas=3 --set proxy.drainDelaySeconds=5 --wait --timeout 5m >/dev/null
+  fleet=$(kubectl -n ferry-system get deploy -l app.kubernetes.io/name=ferry-proxy -o jsonpath='{.items[0].metadata.name}')
+  for _ in $(seq 1 60); do
+    [ "$(kubectl -n ferry-system get deploy "$fleet" -o jsonpath='{.status.readyReplicas}')" = 3 ] && break
+    sleep 5
+  done
+  kubectl -n ferry-system get pods -l app.kubernetes.io/name=ferry-proxy -o wide
+  addr=$(kubectl -n ferry-system get gateway ferry -o jsonpath='{.status.addresses[0].value}')
+  mkdir -p /tmp/load && cp /ferry/bench/exit/m4/load.go /tmp/load/
+  (cd /tmp/load && go mod init load >/dev/null 2>&1 && go build -o /tmp/loadgen .)
+  for _ in $(seq 1 60); do
+    curl -fsS --max-time 2 -o /dev/null -H 'Host: smoke.example' "http://$addr/smoke/hello" && break
+    sleep 2
+  done
+
+  events=/out/m5-k8s-chaos-events.txt
+  : > "$events"
+  ev() { echo "$(date -u +%s) $*" | tee -a "$events"; }
+  proxy_pod() { kubectl -n ferry-system get pods -l app.kubernetes.io/name=ferry-proxy \
+    --field-selector=status.phase=Running -o jsonpath="{.items[$1].metadata.name}"; }
+
+  /tmp/loadgen -url "http://$addr/smoke/hello" -host smoke.example -rate 500 -duration 210s \
+    > /out/m5-k8s-chaos.json &
+  load=$!
+  sleep 20; p=$(proxy_pod 0); ev delete proxy "$p"; kubectl -n ferry-system delete pod "$p" --wait=false >/dev/null
+  sleep 40
+  leader=$(kubectl -n ferry-system get lease ferry-controller -o jsonpath='{.spec.holderIdentity}')
+  ev delete controller-leader "$leader"; kubectl -n ferry-system delete pod "$leader" --wait=false >/dev/null
+  sleep 30
+  e=$(kubectl -n smoke get pods -l app=echo -o jsonpath='{.items[0].metadata.name}')
+  ev delete backend "$e"; kubectl -n smoke delete pod "$e" --wait=false >/dev/null
+  sleep 30; p=$(proxy_pod 1); ev delete proxy "$p"; kubectl -n ferry-system delete pod "$p" --wait=false >/dev/null
+  sleep 30; p=$(proxy_pod 2); ev delete proxy "$p"; kubectl -n ferry-system delete pod "$p" --wait=false >/dev/null
+  set +e; wait "$load"; graceful=$?; set -e
+  echo "   graceful kills: $(cat /out/m5-k8s-chaos.json)"
+
+  kubectl -n ferry-system rollout status deploy/"$fleet" --timeout=300s >/dev/null
+  sleep 15
+  /tmp/loadgen -url "http://$addr/smoke/hello" -host smoke.example -rate 500 -duration 60s \
+    > /out/m5-k8s-chaos-forced.json &
+  load=$!
+  sleep 20; p=$(proxy_pod 0); ev force-kill proxy "$p"
+  kubectl -n ferry-system delete pod "$p" --grace-period=0 --force >/dev/null 2>&1
+  set +e; wait "$load"; set -e
+  echo "   forced kill (informational): $(cat /out/m5-k8s-chaos-forced.json)"
+  kubectl -n ferry-system rollout status deploy/"$fleet" --timeout=300s >/dev/null
+  [ "$graceful" = 0 ] || { echo "requests failed during graceful pod kills"; exit 1; }
+  echo "   chaos OK"
 fi
 
 if has conformance; then
