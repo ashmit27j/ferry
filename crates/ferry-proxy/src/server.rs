@@ -205,6 +205,10 @@ impl Shared {
     }
 
     /// Whether shutdown has started.
+    pub(crate) fn telemetry(&self) -> &Arc<Telemetry> {
+        &self.telemetry
+    }
+
     pub(crate) fn is_draining(&self) -> bool {
         self.draining.load(Ordering::Relaxed)
     }

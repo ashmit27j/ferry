@@ -11,7 +11,7 @@ use std::time::Duration;
 use ferry_controller::certgen;
 use ferry_controller::server::{Hub, TlsFiles, serve};
 use ferry_controller::world::ObjKey;
-use ferry_integration_tests::{any_port, eventually, get};
+use ferry_integration_tests::{any_port, eventually, get, metric};
 use ferry_proxy::remote::{RemoteSource, RemoteTls, follow};
 use ferry_proxy::{Drain, Proxy, ReloadHandle};
 use ferry_telemetry::Telemetry;
@@ -154,12 +154,29 @@ async fn proxy_follows_the_controller_and_survives_its_restart() {
     .await;
     assert_eq!(get(listener, "/").await.backend(), "a");
     assert_eq!(handle.current_version().0, v1);
+    // Counted once, although both the swap and the stream saw it fail.
+    let text = handle.telemetry().metrics.encode().unwrap();
+    assert_eq!(
+        metric(&text, r#"ferry_config_reloads_total{result="failure"}"#),
+        Some(1.0),
+        "{text}"
+    );
+    assert_eq!(metric(&text, "ferry_controller_connected"), Some(1.0));
+    assert!(
+        text.contains(r#"ferry_tls_certificate_expiry_timestamp_seconds{kind="controller",owner="snapshot-stream""#),
+        "{text}"
+    );
 
     // The controller goes away: the proxy keeps serving.
     ctl.stop.cancel();
     ctl.task.await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(get(listener, "/").await.backend(), "a");
+    let connected = || {
+        let text = handle.telemetry().metrics.encode().unwrap();
+        metric(&text, "ferry_controller_connected")
+    };
+    eventually(Duration::from_secs(5), || connected() == Some(0.0)).await;
 
     // A new controller (another replica, or the same after a restart)
     // publishes a new config; the proxy reconnects and applies it.
@@ -177,6 +194,7 @@ async fn proxy_follows_the_controller_and_survives_its_restart() {
         "b",
         "same socket, new routes"
     );
+    assert_eq!(connected(), Some(1.0));
     stop.cancel();
     ctl.stop.cancel();
 }

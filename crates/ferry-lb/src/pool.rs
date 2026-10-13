@@ -29,7 +29,7 @@ use http::{Request, Response};
 use hyper::body::{Body, Incoming};
 use hyper::client::conn::{TrySendError, http1, http2};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use rustls::pki_types::ServerName;
+use rustls::pki_types::{CertificateDer, ServerName};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tracing::debug;
@@ -410,6 +410,9 @@ pub struct UpstreamTls {
     /// Fingerprint of the settings; pools with different TLS settings to the
     /// same endpoint are kept apart.
     pub id: u64,
+    /// The end-entity client certificate presented for mutual TLS, kept for
+    /// reporting its expiry.
+    pub client_certificate: Option<CertificateDer<'static>>,
 }
 
 /// A plaintext or TLS upstream connection.

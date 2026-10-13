@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use ferry_integration_tests::{TestProxy, any_port, snapshot};
+use ferry_integration_tests::{TestProxy, any_port, metric, snapshot};
 use ferry_testkit::{Behavior, MockServer, http as mock_http};
 use http_body_util::{BodyExt, Empty};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -181,6 +181,21 @@ async fn sni_selects_the_certificate() {
         .await
         .unwrap();
     assert_eq!(b2.peer_cert, der(&second));
+
+    // Both certificates report their expiry (rcgen's default: year 4096).
+    let text = proxy.metrics_text();
+    for name in ["one.test", "*.two.test"] {
+        let series = format!(
+            r#"ferry_tls_certificate_expiry_timestamp_seconds{{kind="listener",owner="https",name="{name}"}}"#
+        );
+        let v = metric(&text, &series).unwrap_or_else(|| {
+            panic!(
+                "{series} missing in
+{text}"
+            )
+        });
+        assert!(v > 6.0e10, "{series} = {v}");
+    }
 }
 
 #[tokio::test]

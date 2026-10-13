@@ -13,8 +13,8 @@
 //! them from its runtime at scrape time, so they can never go stale.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use prometheus_client::collector::Collector;
@@ -363,6 +363,36 @@ pub struct ProxyStats {
     pub last_reload: AtomicU64,
     /// Access-log lines dropped because the writer fell behind.
     pub access_log_dropped: Arc<AtomicU64>,
+    /// The snapshot stream to the controller; see [`ControllerLink`].
+    pub controller: ControllerLink,
+}
+
+/// A proxy's link to the controller (Kubernetes mode only).
+#[derive(Debug, Default)]
+pub struct ControllerLink {
+    /// 0 = no controller (file config), 1 = disconnected, 2 = connected.
+    state: AtomicU8,
+    /// Name and `notAfter` (Unix seconds) of the client certificate the
+    /// proxy presents to the controller.
+    pub certificate: OnceLock<(String, i64)>,
+}
+
+impl ControllerLink {
+    /// Records whether the stream is up. The first call marks the proxy as
+    /// following a controller, which makes `ferry_controller_connected`
+    /// appear.
+    pub fn set_connected(&self, up: bool) {
+        self.state.store(if up { 2 } else { 1 }, Ordering::Relaxed);
+    }
+
+    /// `None` without a controller, else whether the stream is up.
+    #[must_use]
+    pub fn connected(&self) -> Option<bool> {
+        match self.state.load(Ordering::Relaxed) {
+            0 => None,
+            s => Some(s == 2),
+        }
+    }
 }
 
 impl ProxyStats {
@@ -841,6 +871,15 @@ impl Collector for Families {
             MetricType::Counter,
         )?;
         f.single_counter(p.access_log_dropped.load(Ordering::Relaxed))?;
+        if let Some(up) = p.controller.connected() {
+            Family::start(
+                &mut e,
+                "ferry_controller_connected",
+                "1 while the snapshot stream to the controller is up.",
+                MetricType::Gauge,
+            )?
+            .single_gauge(if up { 1.0 } else { 0.0 })?;
+        }
         Ok(())
     }
 }
@@ -852,6 +891,20 @@ mod tests {
     fn sample(text: &str, series: &str) -> Option<f64> {
         text.lines()
             .find_map(|l| l.strip_prefix(series)?.strip_prefix(' ')?.parse().ok())
+    }
+
+    #[test]
+    fn controller_link_appears_once_a_controller_is_followed() {
+        let m = Metrics::new();
+        let link = &m.proxy().controller;
+        assert_eq!(link.connected(), None);
+        link.set_connected(false);
+        let text = m.encode().unwrap();
+        assert_eq!(sample(&text, "ferry_controller_connected"), Some(0.0));
+        link.set_connected(true);
+        let text = m.encode().unwrap();
+        assert_eq!(sample(&text, "ferry_controller_connected"), Some(1.0));
+        assert_eq!(link.connected(), Some(true));
     }
 
     #[test]
@@ -949,6 +1002,10 @@ mod tests {
         assert_eq!(s(r#"ferry_config_reloads_total{result="success"}"#), 1.0);
         assert_eq!(s(r#"ferry_config_reloads_total{result="failure"}"#), 1.0);
         assert!(s("ferry_config_last_reload_success_timestamp_seconds") > 1.0e9);
+        assert!(
+            sample(&text, "ferry_controller_connected").is_none(),
+            "absent in file mode"
+        );
         assert!(text.contains("process_start_time_seconds"));
         assert!(text.ends_with("# EOF\n"));
     }

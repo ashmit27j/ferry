@@ -24,6 +24,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use x509_parser::extensions::GeneralName;
 
 /// Time allowed for a client to complete the TLS handshake.
 pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -114,6 +115,50 @@ pub(crate) fn certified_key(
     })
 }
 
+/// When a certificate expires, and a name to show for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CertExpiry {
+    /// The first DNS subject alternative name, else the subject common name,
+    /// else empty.
+    pub(crate) name: String,
+    /// `notAfter`, in Unix seconds.
+    pub(crate) not_after: i64,
+}
+
+/// Reads the expiry of a DER certificate; `None` if it does not parse.
+pub(crate) fn cert_expiry(der: &[u8]) -> Option<CertExpiry> {
+    let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
+    let dns = cert
+        .subject_alternative_name()
+        .ok()
+        .flatten()
+        .and_then(|san| {
+            san.value.general_names.iter().find_map(|n| match n {
+                GeneralName::DNSName(d) => Some((*d).to_owned()),
+                _ => None,
+            })
+        });
+    let name = dns
+        .or_else(|| {
+            cert.subject()
+                .iter_common_name()
+                .next()
+                .and_then(|cn| cn.as_str().ok())
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
+    Some(CertExpiry {
+        name,
+        not_after: cert.validity().not_after.timestamp(),
+    })
+}
+
+/// The expiry of the first certificate in a PEM chain.
+pub(crate) fn pem_expiry(pem: &[u8]) -> Option<CertExpiry> {
+    let der = CertificateDer::pem_slice_iter(pem).next()?.ok()?;
+    cert_expiry(&der)
+}
+
 /// Picks a certificate by SNI.
 #[derive(Debug)]
 pub(crate) struct SniResolver {
@@ -197,6 +242,7 @@ pub(crate) fn upstream_tls(
             source,
         })?
         .with_root_certificates(roots);
+    let mut client_certificate = None;
     let mut config = match cfg.client_certificate() {
         None => builder.with_no_client_auth(),
         Some(src) => {
@@ -215,6 +261,7 @@ pub(crate) fn upstream_tls(
                 what: what.clone(),
                 message: format!("bad private key PEM: {e}"),
             })?;
+            client_certificate = certs.first().cloned();
             builder
                 .with_client_auth_cert(certs, key)
                 .map_err(|source| TlsError::Rustls { what, source })?
@@ -233,6 +280,7 @@ pub(crate) fn upstream_tls(
         config: Arc::new(config),
         server_name,
         id: hasher.finish(),
+        client_certificate,
     })
 }
 
@@ -277,6 +325,17 @@ impl ServerTls {
     /// The settings these certificates came from.
     pub(crate) fn sources(&self) -> &ListenerTls {
         &self.sources
+    }
+
+    /// The expiry of every certificate currently offered, in config order.
+    pub(crate) fn expiries(&self) -> Vec<CertExpiry> {
+        self.resolver
+            .certs
+            .load()
+            .iter()
+            .filter_map(|ck| ck.end_entity_cert().ok())
+            .filter_map(|der| cert_expiry(der))
+            .collect()
     }
 
     /// Re-reads the certificate sources and swaps in new certificates if any
@@ -367,6 +426,23 @@ pub(crate) mod tests {
         let b = self_signed(&["b.test"]);
         let err = ServerTls::new(&listener_tls(&[(a.0, b.1)])).unwrap_err();
         assert!(matches!(err, TlsError::Rustls { .. }), "{err}");
+    }
+
+    #[test]
+    fn expiry_comes_from_not_after_and_the_first_dns_name() {
+        let mut params = rcgen::CertificateParams::new(vec!["a.example.com".into()]).unwrap();
+        params.not_after = rcgen::date_time_ymd(2031, 1, 2);
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        let e = pem_expiry(cert.pem().as_bytes()).unwrap();
+        assert_eq!(e.name, "a.example.com");
+        // 2031-01-02T00:00:00Z
+        assert_eq!(e.not_after, 1_925_078_400);
+
+        let tls = ServerTls::new(&listener_tls(&[(cert.pem(), key.serialize_pem())])).unwrap();
+        assert_eq!(tls.expiries(), vec![e]);
+        assert_eq!(pem_expiry(b"not a certificate"), None);
+        assert_eq!(cert_expiry(b"\x30\x03\x02\x01\x00"), None);
     }
 
     #[test]

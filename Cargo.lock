@@ -1088,6 +1088,7 @@ dependencies = [
  "tonic",
  "tracing",
  "webpki-roots",
+ "x509-parser",
 ]
 
 [[package]]

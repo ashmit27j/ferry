@@ -235,6 +235,17 @@ ts("Config",
     (f'max(ferry_draining{{job=~"$job"}})', "draining")],
    "short", 16, w=8)
 advance(8)
+ts("Certificate expiry",
+   "Days until each certificate Ferry presents expires (listener, upstream client, controller stream). Alerts fire under 21 and 7 days.",
+   [(f'min by (kind, owner, name) (ferry_tls_certificate_expiry_timestamp_seconds{{job=~"$job"}} - time()) / 86400', "{{kind}} {{owner}} {{name}}")],
+   "d", 0, w=12, min0=False,
+   thresholds=[("red", None), ("orange", 7), ("green", 21)])
+ts("Controller link",
+   "Proxies with a live snapshot stream to the controller, out of those following one.",
+   [(f'sum(ferry_controller_connected{{job=~"$job"}})', "connected"),
+    (f'count(ferry_controller_connected{{job=~"$job"}})', "following")],
+   "short", 12, w=12)
+advance(8)
 
 def var(name, label, query, include_all=True):
     return {"name": name, "label": label, "type": "query", "datasource": DS,

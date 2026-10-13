@@ -72,6 +72,14 @@ async fn every_dashboard_metric_is_exported() {
         .unwrap();
     let proxy = TestProxy::start(&single_cluster_yaml(&[b.addr()])).await;
     assert_eq!(get(proxy.addr, "/").await.status, 200);
+    // As a proxy following a controller reports it.
+    proxy
+        .reload
+        .telemetry()
+        .metrics
+        .proxy()
+        .controller
+        .set_connected(true);
     let names = exported(&proxy.metrics_text());
 
     let metric = regex::Regex::new(r"\b((?:ferry|process)_[a-z0-9_]+)\b").unwrap();

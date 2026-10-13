@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use ferry_integration_tests::{TestProxy, any_port, get, snapshot};
+use ferry_integration_tests::{TestProxy, any_port, get, metric, snapshot};
 use ferry_testkit::{Behavior, MockServer, http as mock_http};
 use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
 use rustls::pki_types::pem::PemObject;
@@ -173,6 +173,13 @@ async fn mutual_tls_presents_the_client_certificate() {
     let r = get(proxy.addr, "/").await;
     assert_eq!(r.status, 200, "{:?}", r.body);
     assert_eq!(r.echo()["tls"]["client_cert"], true);
+    let text = proxy.metrics_text();
+    let series = r#"ferry_tls_certificate_expiry_timestamp_seconds{kind="upstream",owner="c",name="ferry.test"}"#;
+    assert!(
+        metric(&text, series).is_some(),
+        "{series} missing in
+{text}"
+    );
 }
 
 #[tokio::test]

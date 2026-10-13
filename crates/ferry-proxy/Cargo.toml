@@ -13,6 +13,7 @@ arc-swap.workspace = true
 rustls.workspace = true
 rustls-webpki.workspace = true
 webpki-roots.workspace = true
+x509-parser.workspace = true
 tokio-rustls.workspace = true
 fastrand.workspace = true
 ferry-api.workspace = true

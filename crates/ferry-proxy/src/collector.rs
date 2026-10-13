@@ -15,6 +15,7 @@ use prometheus_client::metrics::MetricType;
 
 use crate::server::Shared;
 use crate::state::ClusterRuntime;
+use crate::tls::{CertExpiry, cert_expiry};
 
 /// Exports the proxy's live state.
 #[derive(Debug)]
@@ -245,6 +246,55 @@ impl Collector for StateCollector {
             f.gauge(
                 &[("cluster", *c), ("endpoint", a.as_str())],
                 gauge_u64(*idle as u64),
+            )?;
+        }
+
+        // Certificate expiry: listener certificates as currently offered (so
+        // rotations show), upstream client certificates, and the snapshot
+        // stream's client certificate.
+        let mut certs: Vec<(&str, &str, CertExpiry)> = Vec::new();
+        for l in runtime.listeners.iter().flatten() {
+            if let Some(tls) = &l.tls {
+                for c in tls.expiries() {
+                    certs.push(("listener", l.config.name(), c));
+                }
+            }
+        }
+        for c in clusters {
+            let cert = c.tls.as_ref().and_then(|t| t.client_certificate.as_ref());
+            if let Some(e) = cert.and_then(|der| cert_expiry(der)) {
+                certs.push(("upstream", c.config.name(), e));
+            }
+        }
+        let controller = shared
+            .telemetry()
+            .metrics
+            .proxy()
+            .controller
+            .certificate
+            .get();
+        if let Some((name, not_after)) = controller {
+            let e = CertExpiry {
+                name: name.clone(),
+                not_after: *not_after,
+            };
+            certs.push(("controller", "snapshot-stream", e));
+        }
+        let mut f = Family::start(
+            &mut e,
+            "ferry_tls_certificate_expiry_timestamp_seconds",
+            "notAfter of each certificate Ferry presents, in Unix seconds: kind is listener, upstream (client certificate) or controller.",
+            MetricType::Gauge,
+        )?;
+        for (kind, owner, c) in &certs {
+            #[allow(clippy::cast_precision_loss)]
+            f.gauge(
+                &[
+                    ("kind", *kind),
+                    ("owner", *owner),
+                    ("name", c.name.as_str()),
+                ],
+                c.not_after as f64,
             )?;
         }
         Ok(())
