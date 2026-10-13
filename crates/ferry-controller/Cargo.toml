@@ -9,7 +9,28 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+ferry-api.workspace = true
+ferry-config.workspace = true
+futures-util.workspace = true
+k8s-openapi.workspace = true
+kube.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde-saphyr.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "macros", "sync", "fs"] }
+tokio-stream = { workspace = true, features = ["sync", "net"] }
+tokio-util.workspace = true
+tonic = { workspace = true, features = ["server", "router", "transport", "tls-aws-lc"] }
+tracing.workspace = true
+twox-hash.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]
 workspace = true

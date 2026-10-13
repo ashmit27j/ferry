@@ -8,6 +8,13 @@
 //! Until then, [`run`] reports that the controller is not available so the
 //! `ferry controller` subcommand fails cleanly instead of pretending to work.
 
+pub mod certgen;
+pub mod gateway_api;
+pub mod policy;
+pub mod server;
+pub mod translate;
+pub mod world;
+
 /// Errors from the controller.
 #[derive(Debug, thiserror::Error)]
 pub enum ControllerError {

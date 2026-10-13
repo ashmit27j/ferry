@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 581a51395c5999c922963813fefa8fc36519b42e79ba1a70f9916ad2e122131f # shrinks to listeners = ["{ port: 80, protocol: HTTP, allowedRoutes: { namespaces: { from: All } } }"], routes = [("web", "", None, "{ name: infra-backend-v1, port: 8081, weight: 0 }", "/")]
