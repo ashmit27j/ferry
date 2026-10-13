@@ -11,6 +11,10 @@ use std::str::FromStr;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Longest duration that prints in canonical form (the hour count is five
+/// digits at most): just under 100,000 hours.
+const MAX_MS: u64 = 100_000 * 3_600_000 - 1;
+
 /// A non-negative duration written as GEP-2257 text, such as `1m30s`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -97,13 +101,23 @@ impl FromStr for Duration {
             }
             total_ms += n * ms_per_unit;
         }
+        // Four components can add up to more than the canonical form can
+        // print (`99999h99999h`), and a config the proxy writes must parse
+        // back (the controller's snapshots do exactly that).
+        if total_ms > MAX_MS {
+            return Err(err("longer than 99999h59m59s999ms"));
+        }
         Ok(Self(std::time::Duration::from_millis(total_ms)))
     }
 }
 
 impl fmt::Display for Duration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut ms = u64::try_from(self.0.as_millis()).unwrap_or(u64::MAX);
+        // Values built in code may be longer than any parsable text; clamp
+        // so the output always parses.
+        let mut ms = u64::try_from(self.0.as_millis())
+            .unwrap_or(u64::MAX)
+            .min(MAX_MS);
         if ms == 0 {
             return f.write_str("0s");
         }
@@ -177,6 +191,10 @@ mod tests {
             "-1s",
             "123456s",
             "1h1h1h1h1h",
+            // Found by the header_values fuzz target: valid components whose
+            // sum (100,082 h) has no canonical form.
+            "99991h83ms91h83ms",
+            "99999h99999h",
             " 5s",
             "5 s",
         ] {
@@ -189,13 +207,24 @@ mod tests {
         assert_eq!(Duration::new(Std::from_secs(90)).to_string(), "1m30s");
         assert_eq!(Duration::new(Std::ZERO).to_string(), "0s");
         assert_eq!(Duration::new(Std::from_millis(1500)).to_string(), "1s500ms");
+        let max = "99999h59m59s999ms";
+        assert_eq!(max.parse::<Duration>().unwrap().to_string(), max);
+        // Longer values clamp to the longest one that parses.
+        assert_eq!(Duration::new(Std::from_secs(u64::MAX)).to_string(), max);
     }
 
     proptest! {
         #[test]
-        fn display_round_trips(ms in 0u64..(99_999 * 3_600_000)) {
+        fn display_round_trips(ms in 0u64..=MAX_MS) {
             let d = Duration::new(Std::from_millis(ms));
             prop_assert_eq!(d.to_string().parse::<Duration>().unwrap(), d);
+        }
+
+        #[test]
+        fn parsed_text_round_trips(text in "([0-9]{1,5}(h|m|s|ms)){1,4}") {
+            if let Ok(d) = text.parse::<Duration>() {
+                prop_assert_eq!(d.to_string().parse::<Duration>().unwrap(), d);
+            }
         }
     }
 }
