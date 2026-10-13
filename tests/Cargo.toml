@@ -67,6 +67,10 @@ path = "it/drain.rs"
 name = "grpc"
 path = "it/grpc.rs"
 
+[[test]]
+name = "h2_attacks"
+path = "it/h2_attacks.rs"
+
 [dependencies]
 bytes.workspace = true
 ferry-config.workspace = true
