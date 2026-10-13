@@ -1,0 +1,97 @@
+== backends
+== ferry (cores 0)
+== prometheus
+== 10000 WebSockets, held for the soak
+== chaos every 20 minutes (timeline: results/m5-chaos.txt)
+== soak: 10000 req/s for 4h in 300s segments
+   segment 1 done (300/14400 s), ferry RSS 118332 kB
+   segment 2 done (600/14400 s), ferry RSS 121388 kB
+   segment 3 done (900/14400 s), ferry RSS 122164 kB
+   segment 4 done (1200/14400 s), ferry RSS 122488 kB
+   segment 5 done (1500/14400 s), ferry RSS 120612 kB
+Error response from daemon: container 80db3e23f084a1a442ba279045e8b3d748631b128d85181457611af39e6e5366 is not running
+   segment 6 done (1800/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 7 done (2100/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 8 done (2400/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 9 done (2700/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 10 done (3000/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 11 done (3300/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 12 done (3600/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 13 done (3900/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 14 done (4200/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 15 done (4500/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 16 done (4800/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 17 done (5100/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 18 done (5400/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 19 done (5700/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 20 done (6000/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 21 done (6300/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 22 done (6600/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 23 done (6900/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 24 done (7200/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 25 done (7500/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 26 done (7800/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 27 done (8100/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 28 done (8400/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 29 done (8700/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 30 done (9000/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 31 done (9300/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 32 done (9600/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 33 done (9900/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 34 done (10200/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 35 done (10500/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 36 done (10800/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 37 done (11100/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 38 done (11400/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 39 done (11700/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 40 done (12000/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 41 done (12300/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 42 done (12600/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 43 done (12900/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 44 done (13200/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 45 done (13500/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 46 done (13800/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 47 done (14100/14400 s), ferry RSS 
+Error response from daemon: No such container: m5-ferry
+   segment 48 done (14400/14400 s), ferry RSS 

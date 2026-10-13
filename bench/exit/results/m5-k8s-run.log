@@ -1,0 +1,128 @@
+== images
+== kind cluster ferry-m4
+Deleting cluster "ferry-m4" ...
+No kind clusters found.
+Creating cluster "ferry-m4" ...
+ • Ensuring node image (kindest/node:v1.37.0) 🖼️  ...
+ ✓ Ensuring node image (kindest/node:v1.37.0) 🖼️
+ • Preparing nodes 📦   ...
+ ✓ Preparing nodes 📦 
+ • Writing configuration 📜  ...
+ ✓ Writing configuration 📜
+ • Starting control-plane 🕹️  ...
+ ✓ Starting control-plane 🕹️
+ • Installing CNI 🔌  ...
+ ✓ Installing CNI 🔌
+ • Installing StorageClass 💾  ...
+ ✓ Installing StorageClass 💾
+ • Waiting ≤ 3m0s for control-plane = Ready ⏳  ...
+ ✓ Waiting ≤ 3m0s for control-plane = Ready ⏳
+ • Ready after 19s 💚
+Set kubectl context to "kind-ferry-m4"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-ferry-m4
+
+Have a nice day! 👋
+== load the ferry image into kind
+Image: "ferry:dev" with ID "sha256:9d80ac02c1784c0e9376a11e5238561602c76f2ae833e053d0d2335b89bf7176" not yet present on node "ferry-m4-control-plane", loading...
+== MetalLB, for LoadBalancer addresses on the kind network
+Waiting for deployment "controller" rollout to finish: 0 of 1 updated replicas are available...
+deployment "controller" successfully rolled out
+Waiting for daemon set "speaker" rollout to finish: 0 of 1 updated pods are available...
+daemon set "speaker" successfully rolled out
+   pool 172.19.255.100-172.19.255.250
+== helm install ferry
+Release "ferry" does not exist. Installing it now.
+I1013 15:28:09.484481     265 warnings.go:110] "Warning: unrecognized format \"uint32\""
+I1013 15:28:09.484915     265 warnings.go:110] "Warning: unrecognized format \"uint64\""
+I1013 15:28:09.484925     265 warnings.go:110] "Warning: unrecognized format \"uint8\""
+I1013 15:28:09.484927     265 warnings.go:110] "Warning: unrecognized format \"uint16\""
+NAME: ferry
+LAST DEPLOYED: Tue Oct 13 15:28:11 2026
+NAMESPACE: ferry-system
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NAME                                       READY   STATUS    RESTARTS   AGE   IP           NODE                     NOMINATED NODE   READINESS GATES
+ferry-controller-7c6dfb4b9d-28qhl          1/1     Running   0          2s    10.244.0.7   ferry-m4-control-plane   <none>           <none>
+ferry-controller-7c6dfb4b9d-fjqpz          1/1     Running   0          2s    10.244.0.8   ferry-m4-control-plane   <none>           <none>
+ferry-ferry-system-ferry-8895f8467-54cbz   0/1     Running   0          1s    10.244.0.9   ferry-m4-control-plane   <none>           <none>
+== smoke: the Helm-created Gateway serves an HTTPRoute
+Waiting for deployment "echo" rollout to finish: 0 of 2 updated replicas are available...
+Waiting for deployment "echo" rollout to finish: 1 of 2 updated replicas are available...
+deployment "echo" successfully rolled out
+gateway.gateway.networking.k8s.io/ferry condition met
+   gateway address 172.19.255.100
+{
+ "path": "/smoke/hello",
+ "host": "smoke.example",
+ "method": "GET",
+ "proto": "HTTP/1.1",
+ "headers": {
+  "Accept": [
+   "*/*"
+  ],
+  "User-Agent": [
+   "curl/7.88.1"
+  ],
+  "X-Ferry-Smoke": [
+   "1"
+  ],
+  "X-Forwarded-For": [
+   "10.244.0.1"
+  ],
+  "X-Forwarded-Proto": [
+   "http"
+  ],
+  "X-Request-Id": [
+   "533186cf-593a-45d9-8838-1e61af0748e4"
+  ]
+ },
+ "httpPort": "3000",
+ "namespace": "smoke",
+ "ingress": "",
+ "service": "",
+ "pod": "echo-575cbdb455-h7f74"
+}
+ferry: Accepted=True ResolvedRefs=True 
+FerryPolicy Accepted=True (Accepted)
+NAME    CLASS   ADDRESS          PROGRAMMED   AGE
+ferry   ferry   172.19.255.100   True         7s
+   smoke OK
+== chaos: pod kills under load
+deployment "echo" successfully rolled out
+NAME                                       READY   STATUS    RESTARTS   AGE   IP            NODE                     NOMINATED NODE   READINESS GATES
+ferry-ferry-system-ferry-687cdcdd-9wnkb    0/1     Running   0          3s    10.244.0.18   ferry-m4-control-plane   <none>           <none>
+ferry-ferry-system-ferry-687cdcdd-tqbp4    1/1     Running   0          10s   10.244.0.17   ferry-m4-control-plane   <none>           <none>
+ferry-ferry-system-ferry-8895f8467-54cbz   1/1     Running   0          23s   10.244.0.9    ferry-m4-control-plane   <none>           <none>
+ferry-ferry-system-ferry-8895f8467-htt7w   1/1     Running   0          10s   10.244.0.16   ferry-m4-control-plane   <none>           <none>
+1791905344 delete proxy ferry-ferry-system-ferry-687cdcdd-9wnkb
+1791905384 delete controller-leader ferry-controller-5dc78b5576-5b27q
+1791905414 delete backend echo-575cbdb455-h7f74
+1791905444 delete proxy ferry-ferry-system-ferry-687cdcdd-tqbp4
+1791905474 delete proxy ferry-ferry-system-ferry-687cdcdd-z8m9x
+   graceful kills: {"errors":{},"failed":0,"max_ms":2001.274,"ok":104970,"p50_ms":0.303,"p99_ms":0.521,"rate_per_second":500,"seconds":210.001075923,"sent":104970,"statuses":{"200":104970},"success_ratio":1}
+1791905569 force-kill proxy ferry-ferry-system-ferry-687cdcdd-4zkq9
+   forced kill (informational): {"errors":{},"failed":0,"max_ms":3.593,"ok":29994,"p50_ms":0.299,"p99_ms":0.503,"rate_per_second":500,"seconds":60.000342016,"sent":29994,"statuses":{"200":29994},"success_ratio":1}
+   chaos OK
+== Gateway API v1.6.3 conformance: GATEWAY-HTTP, GATEWAY-GRPC (Gateway,HTTPRoute,GRPCRoute,ReferenceGrant)
+   215 passed, 0 failed (sub-tests included)
+profiles:
+- core:
+    result: success
+    statistics:
+      Failed: 0
+      Passed: 36
+      Skipped: 0
+  name: GATEWAY-HTTP
+  summary: Core tests succeeded.
+- core:
+    result: success
+    statistics:
+      Failed: 0
+      Passed: 14
+      Skipped: 0
+  name: GATEWAY-GRPC
+  summary: Core tests succeeded.
+exit=0

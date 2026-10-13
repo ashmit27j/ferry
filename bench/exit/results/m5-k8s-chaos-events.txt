@@ -1,0 +1,6 @@
+1791905344 delete proxy ferry-ferry-system-ferry-687cdcdd-9wnkb
+1791905384 delete controller-leader ferry-controller-5dc78b5576-5b27q
+1791905414 delete backend echo-575cbdb455-h7f74
+1791905444 delete proxy ferry-ferry-system-ferry-687cdcdd-tqbp4
+1791905474 delete proxy ferry-ferry-system-ferry-687cdcdd-z8m9x
+1791905569 force-kill proxy ferry-ferry-system-ferry-687cdcdd-4zkq9

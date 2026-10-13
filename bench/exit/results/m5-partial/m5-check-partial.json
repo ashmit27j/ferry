@@ -1,0 +1,75 @@
+{
+  "ok": false,
+  "checks": [
+    {
+      "name": "success ratio >= 99.95%",
+      "ok": true,
+      "value": 1.0,
+      "requests": 17342356.582417414,
+      "5xx": 0
+    },
+    {
+      "name": "added latency p50 < 0.2 ms",
+      "ok": true,
+      "value_ms": 0.012559689401754922
+    },
+    {
+      "name": "added latency p99 < 1 ms",
+      "ok": true,
+      "value_ms": 0.02486818501547474
+    },
+    {
+      "name": "flat resident memory",
+      "ok": false,
+      "samples": 45,
+      "first": 124633088.0,
+      "last": 134004736.0,
+      "min": 121700352.0,
+      "max": 140324864.0,
+      "median": 125280256.0,
+      "slope_per_hour": 20683537.201581027,
+      "projected_72h_growth": 1489214678.513834,
+      "allowed_72h_growth": 16777216
+    },
+    {
+      "name": "flat open file descriptors",
+      "ok": false,
+      "samples": 45,
+      "first": 21609.0,
+      "last": 21805.0,
+      "min": 21457.0,
+      "max": 21806.0,
+      "median": 21593.0,
+      "slope_per_hour": 352.4110671936759,
+      "projected_72h_growth": 25373.596837944664,
+      "allowed_72h_growth": 2159.3
+    },
+    {
+      "name": "every WebSocket opened and stayed alive",
+      "ok": false
+    },
+    {
+      "name": "k6 delivered the offered load (< 0.01% dropped iterations)",
+      "ok": true,
+      "segments": 5,
+      "requests": 14999529,
+      "failed": 0,
+      "failed_ratio": 0.0,
+      "dropped_iterations": 474,
+      "worst_segment_p99_ms": 3.476608040000001,
+      "median_segment_p50_ms": 0.197271,
+      "dropped_ratio": 3.1599993680001265e-05
+    }
+  ],
+  "run": {
+    "duration_seconds": 1806,
+    "rate": 10000,
+    "reloads": 30.06857717815693,
+    "reload_failures": 0.0,
+    "local_replies": {},
+    "retries": 987.2516173494857,
+    "ejections": 4.009143623754257,
+    "peak_active_connections": 11024.0,
+    "peak_rss_bytes": 140324864.0
+  }
+}
