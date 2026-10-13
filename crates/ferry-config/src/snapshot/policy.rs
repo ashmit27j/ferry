@@ -98,6 +98,7 @@ pub struct Limits {
     pub(crate) max_request_headers: usize,
     pub(crate) max_request_body_bytes: Option<u64>,
     pub(crate) h2_max_concurrent_streams: u32,
+    pub(crate) max_connections: u32,
 }
 
 impl Default for Limits {
@@ -107,6 +108,7 @@ impl Default for Limits {
             max_request_headers: 100,
             max_request_body_bytes: None,
             h2_max_concurrent_streams: 100,
+            max_connections: 100_000,
         }
     }
 }
@@ -135,6 +137,12 @@ impl Limits {
     pub fn h2_max_concurrent_streams(&self) -> u32 {
         self.h2_max_concurrent_streams
     }
+
+    /// Most open downstream connections.
+    #[must_use]
+    pub fn max_connections(&self) -> u32 {
+        self.max_connections
+    }
 }
 
 /// Connection-level timeouts of a listener.
@@ -142,6 +150,7 @@ impl Limits {
 pub struct ListenerTimeouts {
     pub(crate) header_read: Duration,
     pub(crate) h2_keep_alive: Duration,
+    pub(crate) tunnel_idle: Duration,
 }
 
 impl Default for ListenerTimeouts {
@@ -149,6 +158,7 @@ impl Default for ListenerTimeouts {
         Self {
             header_read: Duration::from_secs(30),
             h2_keep_alive: Duration::from_secs(20),
+            tunnel_idle: Duration::from_secs(3600),
         }
     }
 }
@@ -164,6 +174,12 @@ impl ListenerTimeouts {
     #[must_use]
     pub fn h2_keep_alive(&self) -> Duration {
         self.h2_keep_alive
+    }
+
+    /// Longest silence on an upgraded connection before it is closed.
+    #[must_use]
+    pub fn tunnel_idle(&self) -> Duration {
+        self.tunnel_idle
     }
 }
 

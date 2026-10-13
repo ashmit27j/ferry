@@ -840,7 +840,7 @@ kind: FerryPolicy
 metadata: { name: edge, namespace: infra }
 spec:
   targetRefs: [{ group: gateway.networking.k8s.io, kind: Gateway, name: same-namespace }]
-  listener: { maxRequestHeaders: 50, headerReadTimeout: 10s }
+  listener: { maxRequestHeaders: 50, headerReadTimeout: 10s, maxConnections: 5000, tunnelIdleTimeout: 10m }
 ",
     );
     let t = translate(
@@ -853,6 +853,11 @@ spec:
     let l = &gw(&t, "same-namespace").config.listeners[0];
     assert!(l.proxy_protocol);
     assert_eq!(l.limits.as_ref().unwrap().max_request_headers, Some(50));
+    assert_eq!(l.limits.as_ref().unwrap().max_connections, Some(5000));
+    assert_eq!(
+        l.timeouts.as_ref().unwrap().tunnel_idle,
+        Some("10m".parse().unwrap())
+    );
 }
 
 #[test]

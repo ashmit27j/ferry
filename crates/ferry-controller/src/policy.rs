@@ -157,6 +157,14 @@ pub struct ListenerPolicy {
     /// Lowest TLS version accepted on HTTPS listeners: `"1.2"` or `"1.3"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_min_version: Option<String>,
+    /// Most open connections per proxy replica (default 100000); further
+    /// connections are closed on accept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_connections: Option<u32>,
+    /// Silence after which a WebSocket or other upgraded connection is
+    /// closed, e.g. `1h` (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_idle_timeout: Option<String>,
 }
 
 /// A cluster-wide token bucket.
@@ -482,11 +490,14 @@ impl FerryPolicySpec {
         limits.max_request_headers = p.max_request_headers;
         limits.max_request_body_bytes = p.max_request_body_bytes;
         limits.h2_max_concurrent_streams = p.h2_max_concurrent_streams;
+        limits.max_connections = p.max_connections;
         l.limits = Some(limits);
         let mut timeouts = ListenerTimeoutsConfig::default();
         timeouts.header_read =
             duration("listener.headerReadTimeout", p.header_read_timeout.as_ref())?;
         timeouts.h2_keep_alive = duration("listener.h2KeepAlive", p.h2_keep_alive.as_ref())?;
+        timeouts.tunnel_idle =
+            duration("listener.tunnelIdleTimeout", p.tunnel_idle_timeout.as_ref())?;
         l.timeouts = Some(timeouts);
         if let (Some(v), Some(tls)) = (&p.tls_min_version, l.tls.as_mut()) {
             tls.min_version = Some(tls_version(v)?);

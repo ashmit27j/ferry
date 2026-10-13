@@ -31,7 +31,7 @@ use crate::proxy_protocol;
 use crate::state::{BoundListener, Control, HealthSink, ListenerRuntime, Runtime, prepare};
 use crate::tls::HANDSHAKE_TIMEOUT;
 use ferry_telemetry::Telemetry;
-use ferry_telemetry::metrics::ListenerStats;
+use ferry_telemetry::metrics::{ConnectionGuard, ListenerStats};
 
 /// How long a draining proxy waits for in-flight requests before closing connections.
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -692,8 +692,15 @@ async fn accept_loop(
                         drop(stream);
                         continue;
                     };
-                    let scheme = if listener.config.tls().is_some() { "https" } else { "http" };
                     let stats = Arc::clone(&listener.stats);
+                    let max = i64::from(listener.config.limits().max_connections());
+                    if stats.active_connections.load(Ordering::Relaxed) >= max {
+                        // Full (ADR 0037): close before any PROXY or TLS work.
+                        stats.overflows.inc();
+                        drop(stream);
+                        continue;
+                    }
+                    let scheme = if listener.config.tls().is_some() { "https" } else { "http" };
                     let proxy_protocol = listener.config.proxy_protocol();
                     let tls = listener.tls.as_ref().map(|t| Arc::clone(&t.config));
                     // Redirects keep the port clients used, not the bound one.
@@ -711,7 +718,10 @@ async fn accept_loop(
                         peer,
                         scheme,
                     };
-                    let accepted = Accepted { from, proxy_protocol, tls, stats };
+                    // Counted before the task starts, so a burst of accepts
+                    // cannot overshoot the cap.
+                    let open = stats.open_connection();
+                    let accepted = Accepted { from, proxy_protocol, tls, stats, open };
                     serve(&shared, builder, &graceful, accepted, stream);
                 }
                 Err(e) => {
@@ -737,6 +747,7 @@ struct Accepted {
     proxy_protocol: bool,
     tls: Option<Arc<rustls::ServerConfig>>,
     stats: Arc<ListenerStats>,
+    open: ConnectionGuard,
 }
 
 fn serve(
@@ -751,6 +762,7 @@ fn serve(
         proxy_protocol,
         tls,
         stats,
+        open,
     } = accepted;
     if let Err(e) = stream.set_nodelay(true) {
         debug!(peer = %from.peer, error = %e, "set_nodelay failed");
@@ -759,7 +771,7 @@ fn serve(
     let builder = builder.clone();
     let watcher = graceful.watcher();
     tokio::spawn(async move {
-        let _open = stats.open_connection();
+        let _open = open;
         // PROXY header first (the NLB sends it before anything else), then TLS.
         if proxy_protocol {
             match proxy_protocol::read_header(&mut stream, from.peer).await {

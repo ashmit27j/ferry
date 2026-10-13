@@ -138,3 +138,45 @@ async fn non_chunked_transfer_encoding_gets_400() {
     assert!(resp.starts_with("HTTP/1.1 400"), "{resp}");
     assert_eq!(backend.stats().requests(), 0);
 }
+
+#[tokio::test]
+async fn connections_over_max_connections_are_closed_on_accept() {
+    let (_b, proxy) = setup("{ max_connections: 2 }").await;
+    // Two idle connections fill the listener.
+    let held: Vec<TcpStream> = vec![
+        TcpStream::connect(proxy.addr).await.unwrap(),
+        TcpStream::connect(proxy.addr).await.unwrap(),
+    ];
+    ferry_integration_tests::eventually(Duration::from_secs(5), || {
+        ferry_integration_tests::metric(
+            &proxy.metrics_text(),
+            r#"ferry_downstream_active_connections{listener="http"}"#,
+        ) == Some(2.0)
+    })
+    .await;
+    // A third is closed without a response.
+    let refused = exchange(proxy.addr, b"GET / HTTP/1.1\r\nHost: a\r\n\r\n").await;
+    assert_eq!(refused, "", "no response over the cap");
+    assert_eq!(
+        ferry_integration_tests::metric(
+            &proxy.metrics_text(),
+            r#"ferry_downstream_connection_overflows_total{listener="http"}"#
+        ),
+        Some(1.0)
+    );
+    // Closing one makes room again.
+    drop(held);
+    ferry_integration_tests::eventually(Duration::from_secs(5), || {
+        ferry_integration_tests::metric(
+            &proxy.metrics_text(),
+            r#"ferry_downstream_active_connections{listener="http"}"#,
+        ) == Some(0.0)
+    })
+    .await;
+    let served = exchange(
+        proxy.addr,
+        b"GET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert!(served.starts_with("HTTP/1.1 200"), "{served}");
+}

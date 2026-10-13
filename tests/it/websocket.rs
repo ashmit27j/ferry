@@ -10,11 +10,16 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
 fn yaml(backend: SocketAddr, protocol: &str) -> String {
+    yaml_with(backend, protocol, "")
+}
+
+fn yaml_with(backend: SocketAddr, protocol: &str, listener_extra: &str) -> String {
     format!(
         r#"
 listeners:
   - name: http
     address: 127.0.0.1:0
+{listener_extra}
     routes:
       - name: all
         rules: [{{ backends: [{{ cluster: c }}] }}]
@@ -100,4 +105,37 @@ async fn upgrade_to_an_http2_cluster_is_not_attempted() {
     let err = tokio_tungstenite::connect_async(format!("ws://{}/", proxy.addr)).await;
     assert!(err.is_err(), "no 101 without an HTTP/1.1 cluster");
     assert_eq!(http.stats().requests(), 1);
+}
+
+#[tokio::test]
+async fn silent_tunnels_close_after_tunnel_idle() {
+    let ws = mock_ws::spawn(any_port(), Behavior::named("ws"))
+        .await
+        .unwrap();
+    let proxy = TestProxy::start(&yaml_with(
+        ws.addr(),
+        "http1",
+        "    timeouts: { tunnel_idle: 1s }",
+    ))
+    .await;
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{}/", proxy.addr))
+        .await
+        .unwrap();
+    // Traffic every 400 ms keeps the tunnel open past 1 s.
+    for i in 0..4 {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        socket.send(Message::text(format!("{i}"))).await.unwrap();
+        assert_eq!(
+            socket.next().await.unwrap().unwrap(),
+            Message::text(format!("{i}"))
+        );
+    }
+    // Then silence: Ferry closes both sides, and the client sees the end.
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+        .await
+        .expect("tunnel still open after 5 s of silence");
+    assert!(
+        !matches!(ended, Some(Ok(Message::Text(_) | Message::Binary(_)))),
+        "{ended:?}"
+    );
 }

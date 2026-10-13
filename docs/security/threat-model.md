@@ -56,7 +56,7 @@ under **residual risks**, with an owner milestone.
 | D | Header floods, oversized bodies | 60 KiB / 100 headers (431), body limit (413), header read timeout (408) | ADR 0016; `tests/it/security.rs` |
 | D | HTTP/2 Rapid Reset, MadeYouReset, CONTINUATION flood, stream floods | Reset caps then GOAWAY, header list limit, 100 concurrent streams | ADR 0016; `tests/it/h2_attacks.rs` |
 | D | Slowloris on HTTP/1.1 | Header read timeout closes connections that do not finish headers | ADR 0016 |
-| D | Many idle connections exhaust file descriptors or memory | Listener `max_connections` refuses new connections over the cap; idle WebSocket and other upgraded tunnels close after `tunnel_idle` (M5) | ADR 0037; `tests/it/limits.rs` |
+| D | Many idle connections exhaust file descriptors or memory | Listener `max_connections` refuses new connections over the cap; idle WebSocket and other upgraded tunnels close after `tunnel_idle` (M5) | ADR 0037; `tests/it/security.rs`, `tests/it/websocket.rs` |
 | D | Parser crash on hostile bytes | No panics in library code (lint-enforced); PROXY protocol, config, snapshot, gRPC timeout, traceparent and route parsers fuzzed nightly | ADR 0006; `fuzz/` |
 | D | Regex denial of service in route matching | Rust `regex` runs in linear time; compiled size capped (`MAX_REGEX_SIZE`) | `snapshot/matching.rs` |
 | E | Memory corruption | `unsafe` is forbidden workspace-wide | ADR 0006 |

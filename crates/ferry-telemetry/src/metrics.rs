@@ -176,6 +176,8 @@ pub struct ListenerStats {
     pub tls_errors: Counter,
     /// Connections dropped for a missing or malformed PROXY header.
     pub proxy_protocol_errors: Counter,
+    /// Connections closed on accept because the listener was full.
+    pub overflows: Counter,
     /// Responses whose body was not delivered in full (client went away or
     /// the stream broke).
     pub incomplete: Counter,
@@ -191,6 +193,7 @@ impl Default for ListenerStats {
             active_connections: AtomicI64::new(0),
             tls_errors: Counter::default(),
             proxy_protocol_errors: Counter::default(),
+            overflows: Counter::default(),
             incomplete: Counter::default(),
             overhead: Histogram::new(OVERHEAD_BUCKETS),
             local_replies: Default::default(),
@@ -735,7 +738,7 @@ impl Collector for Families {
                 )?;
             }
         }
-        let listener_counters: [CounterSpec<ListenerStats>; 4] = [
+        let listener_counters: [CounterSpec<ListenerStats>; 5] = [
             (
                 "ferry_downstream_connections",
                 "Downstream connections accepted.",
@@ -750,6 +753,11 @@ impl Collector for Families {
                 "ferry_downstream_proxy_protocol_errors",
                 "Downstream connections dropped for a bad PROXY header.",
                 |s| s.proxy_protocol_errors.get(),
+            ),
+            (
+                "ferry_downstream_connection_overflows",
+                "Downstream connections closed on accept because the listener held max_connections.",
+                |s| s.overflows.get(),
             ),
             (
                 "ferry_downstream_incomplete_responses",

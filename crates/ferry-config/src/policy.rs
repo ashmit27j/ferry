@@ -70,6 +70,10 @@ pub struct ListenerLimitsConfig {
     /// Most concurrent HTTP/2 streams per connection (1–10000). Defaults to 100.
     #[serde(default)]
     pub h2_max_concurrent_streams: Option<u32>,
+    /// Most open downstream connections (1–1000000); further connections are
+    /// closed on accept. Defaults to 100000 (ADR 0037).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_connections: Option<u32>,
 }
 
 /// Connection-level timeouts.
@@ -86,6 +90,11 @@ pub struct ListenerTimeoutsConfig {
     /// answer within the same time is disconnected. Defaults to `20s`.
     #[serde(default)]
     pub h2_keep_alive: Option<Duration>,
+    /// How long an upgraded connection (WebSocket) may carry no bytes in
+    /// either direction before both sides are closed. Defaults to `1h`
+    /// (ADR 0037).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_idle: Option<Duration>,
 }
 
 /// A token bucket per key: `requests` tokens refill every `per`, up to `burst`.

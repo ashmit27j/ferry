@@ -297,6 +297,7 @@ async fn proxy(
         hash,
         per_try: timeouts.backend_request(),
         idle: timeouts.idle(),
+        tunnel_idle: listener.config.timeouts().tunnel_idle(),
         policy,
         trace: tracing.zip(ex.span.as_ref()),
     };
@@ -587,6 +588,8 @@ struct Attempts<'a> {
     hash: Option<u64>,
     per_try: Option<Duration>,
     idle: Duration,
+    /// Silence after which an upgraded connection is closed (ADR 0037).
+    tunnel_idle: Duration,
     policy: Option<&'a RetryPolicy>,
     /// The tracer and the request's server span, when tracing is on.
     trace: Option<(&'a Tracing, &'a ServerSpan)>,
@@ -759,7 +762,13 @@ impl Attempts<'_> {
                                 .headers
                                 .insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
                         }
-                        tokio::spawn(tunnel(downstream, upstream, guard, request_slot));
+                        tokio::spawn(tunnel(
+                            downstream,
+                            upstream,
+                            guard,
+                            request_slot,
+                            self.tunnel_idle,
+                        ));
                         return Ok(Response::from_parts(parts, empty_body()));
                     }
                     cluster
@@ -849,10 +858,17 @@ fn upgrade_protocol(headers: &HeaderMap) -> Option<HeaderValue> {
         .flatten()
 }
 
-/// Copies bytes both ways between an upgraded client and backend until either
-/// closes. The endpoint's in-flight guard and request slot live as long as the
-/// tunnel, so balancing and circuit breakers see it as one long request.
-async fn tunnel(downstream: OnUpgrade, upstream: OnUpgrade, guard: RequestGuard, slot: Permit) {
+/// Copies bytes both ways between an upgraded client and backend until both
+/// close or the tunnel goes quiet for `idle`. The endpoint's in-flight guard
+/// and request slot live as long as the tunnel, so balancing and circuit
+/// breakers see it as one long request.
+async fn tunnel(
+    downstream: OnUpgrade,
+    upstream: OnUpgrade,
+    guard: RequestGuard,
+    slot: Permit,
+    idle: Duration,
+) {
     let (down, up) = match tokio::try_join!(downstream, upstream) {
         Ok(pair) => pair,
         Err(e) => {
@@ -860,10 +876,9 @@ async fn tunnel(downstream: OnUpgrade, upstream: OnUpgrade, guard: RequestGuard,
             return;
         }
     };
-    let (mut down, mut up) = (TokioIo::new(down), TokioIo::new(up));
-    match tokio::io::copy_bidirectional(&mut down, &mut up).await {
+    match crate::tunnel::relay(TokioIo::new(down), TokioIo::new(up), idle).await {
         Ok((sent, received)) => debug!(sent, received, "upgraded connection closed"),
-        Err(e) => debug!(error = %e, "upgraded connection ended with error"),
+        Err(e) => debug!(error = %e, "upgraded connection ended"),
     }
     drop((guard, slot));
 }

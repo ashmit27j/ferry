@@ -142,11 +142,19 @@ impl Validator {
             1,
             10_000,
         );
+        let connections = self.range(
+            format!("{at}.max_connections"),
+            l.max_connections,
+            d.max_connections,
+            1,
+            1_000_000,
+        );
         Limits {
             max_request_headers_bytes: kb as usize * 1024,
             max_request_headers: count as usize,
             max_request_body_bytes: l.max_request_body_bytes,
             h2_max_concurrent_streams: streams,
+            max_connections: connections,
         }
     }
 
@@ -164,6 +172,7 @@ impl Validator {
                 t.h2_keep_alive,
                 d.h2_keep_alive,
             ),
+            tunnel_idle: self.duration(format!("{at}.tunnel_idle"), t.tunnel_idle, d.tunnel_idle),
         }
     }
 
@@ -444,6 +453,8 @@ clusters:
         assert!(l.tls().is_none() && !l.proxy_protocol());
         assert_eq!(l.limits().max_request_headers(), 100);
         assert_eq!(l.timeouts().header_read(), Duration::from_secs(30));
+        assert_eq!(l.limits().max_connections(), 100_000);
+        assert_eq!(l.timeouts().tunnel_idle(), Duration::from_secs(3600));
         let route = &l.routes()[0];
         assert!(route.rate_limit().is_none());
         let rule = &route.rules()[0];
@@ -465,8 +476,8 @@ clusters:
       certificates:
         - {{ cert_file: /etc/ferry/a.crt, key_file: /etc/ferry/a.key }}
         - {{ cert_pem: "{PEM_CERT}", key_pem: "{PEM_KEY}" }}
-    limits: {{ max_request_headers_kb: 16, max_request_headers: 50, max_request_body_bytes: 1048576, h2_max_concurrent_streams: 50 }}
-    timeouts: {{ header_read: 5s, h2_keep_alive: 10s }}"#
+    limits: {{ max_request_headers_kb: 16, max_request_headers: 50, max_request_body_bytes: 1048576, h2_max_concurrent_streams: 50, max_connections: 500 }}
+    timeouts: {{ header_read: 5s, h2_keep_alive: 10s, tunnel_idle: 5m }}"#
             ),
             "        rate_limit: { requests: 100, per: 1s, burst: 200, key: { header: x-api-key } }",
             "            timeouts: { request: 10s, backend_request: 2s, idle: 1m }\n            retry: { attempts: 3, codes: [500, 503], backoff: 50ms }",
@@ -484,6 +495,8 @@ clusters:
             CertificateSource::Files { .. }
         ));
         assert_eq!(l.limits().max_request_headers_bytes(), 16 * 1024);
+        assert_eq!(l.limits().max_connections(), 500);
+        assert_eq!(l.timeouts().tunnel_idle(), Duration::from_secs(300));
         let rl = l.routes()[0].rate_limit().unwrap();
         assert_eq!((rl.requests(), rl.burst()), (100, 200));
         assert!(matches!(rl.key(), RateLimitKey::Header(h) if h == "x-api-key"));
@@ -512,8 +525,8 @@ clusters:
     fn bad_values_are_reported() {
         let y = yaml(
             r"    tls: { certificates: [{ cert_file: a.crt }, { cert_pem: nope, key_pem: nope }, {}] }
-    limits: { max_request_headers_kb: 4, max_request_headers: 0, max_request_body_bytes: 0, h2_max_concurrent_streams: 0 }
-    timeouts: { header_read: 0s }",
+    limits: { max_request_headers_kb: 4, max_request_headers: 0, max_request_body_bytes: 0, h2_max_concurrent_streams: 0, max_connections: 0 }
+    timeouts: { header_read: 0s, tunnel_idle: 0s }",
             "        rate_limit: { requests: 0, per: 0s, key: { header: 'bad name' } }",
             "            timeouts: { request: 1s, backend_request: 2s }\n            retry: { attempts: 11, codes: [404] }",
             r"    tls: { ca_file: a, ca_pem: b }
@@ -535,7 +548,9 @@ clusters:
                 &format!("{l}.limits.max_request_headers"),
                 &format!("{l}.limits.max_request_body_bytes"),
                 &format!("{l}.limits.h2_max_concurrent_streams"),
+                &format!("{l}.limits.max_connections"),
                 &format!("{l}.timeouts.header_read"),
+                &format!("{l}.timeouts.tunnel_idle"),
                 &format!("{r}.rate_limit.requests"),
                 &format!("{r}.rate_limit.per"),
                 &format!("{r}.rate_limit.key.header"),
