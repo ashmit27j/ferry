@@ -370,10 +370,17 @@ impl ProxyStats {
     pub fn reload(&self, ok: bool) {
         if ok {
             self.reloads_ok.inc();
-            self.last_reload.store(unix_now(), Ordering::Relaxed);
+            self.mark_loaded();
         } else {
             self.reloads_failed.inc();
         }
+    }
+}
+
+impl ProxyStats {
+    /// Records that a config was loaded now (startup or reload).
+    pub fn mark_loaded(&self) {
+        self.last_reload.store(unix_now(), Ordering::Relaxed);
     }
 }
 

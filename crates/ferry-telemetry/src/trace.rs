@@ -28,6 +28,8 @@ use opentelemetry_sdk::trace::{Sampler, SdkTracer, SdkTracerProvider, SpanExport
 
 use crate::TelemetryError;
 
+pub use opentelemetry::KeyValue as Attribute;
+
 /// Tracing settings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraceConfig {
@@ -125,6 +127,20 @@ impl Tracing {
         }
     }
 
+    /// Starts a client span that begins a new trace, for test clients that
+    /// play the caller in front of Ferry.
+    #[must_use]
+    pub fn root_client_span(&self, name: &str) -> ClientSpan {
+        let span = self
+            .tracer
+            .span_builder(name.to_owned())
+            .with_kind(SpanKind::Client)
+            .start_with_context(&self.tracer, &Context::new());
+        ClientSpan {
+            cx: Context::new().with_span(span),
+        }
+    }
+
     /// Writes `traceparent` (and `tracestate`) for `span` into `headers`.
     pub fn inject(&self, span: &ClientSpan, headers: &mut HeaderMap) {
         self.propagator
@@ -208,6 +224,18 @@ pub struct ClientSpan {
 }
 
 impl ClientSpan {
+    /// Hex trace ID.
+    #[must_use]
+    pub fn trace_id(&self) -> String {
+        self.cx.span().span_context().trace_id().to_string()
+    }
+
+    /// Hex span ID.
+    #[must_use]
+    pub fn span_id(&self) -> String {
+        self.cx.span().span_context().span_id().to_string()
+    }
+
     /// Adds attributes.
     pub fn set_attributes(&self, attributes: impl IntoIterator<Item = KeyValue>) {
         self.cx.span().set_attributes(attributes);

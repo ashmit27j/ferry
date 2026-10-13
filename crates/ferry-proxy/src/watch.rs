@@ -62,6 +62,7 @@ impl FileWatcher {
                 }
                 self.last_hash = Some(h);
                 let msg = format!("cannot read {}: {e}", self.path.display());
+                self.reload.rejected();
                 error!(config = %self.path.display(), error = %e, "config unreadable; keeping current snapshot");
                 return Poll::Rejected(msg);
             }
@@ -88,6 +89,7 @@ impl FileWatcher {
                 }
             },
             Err(e) => {
+                self.reload.rejected();
                 error!(config = %self.path.display(), error = %e, "config rejected; keeping current snapshot");
                 Poll::Rejected(e.to_string())
             }

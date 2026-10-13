@@ -23,11 +23,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::body::UpstreamBody;
+use crate::collector::StateCollector;
 use crate::error::ProxyError;
 use crate::forward::{Downstream, handle};
 use crate::proxy_protocol;
 use crate::state::{BoundListener, Control, HealthSink, ListenerRuntime, Runtime, prepare};
 use crate::tls::HANDSHAKE_TIMEOUT;
+use ferry_telemetry::Telemetry;
+use ferry_telemetry::metrics::ListenerStats;
 
 /// How long a draining proxy waits for in-flight requests before closing connections.
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -63,7 +66,7 @@ const POOL_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Shared between listeners, the reload handle and health checkers.
 #[derive(Debug)]
-struct Shared {
+pub(crate) struct Shared {
     runtime: ArcSwap<Runtime>,
     /// Set when shutdown starts: HTTP/1.1 responses then carry `Connection: close`.
     draining: AtomicBool,
@@ -71,9 +74,20 @@ struct Shared {
     control: Mutex<Control>,
     pools: PoolSet<UpstreamBody>,
     bound: Vec<BoundListener>,
+    telemetry: Arc<Telemetry>,
 }
 
 impl Shared {
+    /// The runtime serving new requests.
+    pub(crate) fn runtime(&self) -> Arc<Runtime> {
+        self.runtime.load_full()
+    }
+
+    /// Whether shutdown has started.
+    pub(crate) fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::Relaxed)
+    }
+
     fn control(&self) -> std::sync::MutexGuard<'_, Control> {
         self.control.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -91,6 +105,7 @@ impl Shared {
             &self.pools,
             &weak,
             &prepared,
+            &self.telemetry.metrics,
         );
         self.runtime.store(Arc::new(next));
         Ok(())
@@ -151,12 +166,27 @@ pub struct ReloadHandle {
 }
 
 impl Proxy {
-    /// Binds every listener in `snapshot` and starts its health checkers.
+    /// Binds every listener in `snapshot` and starts its health checkers,
+    /// with metrics only (no tracing or access log).
     ///
     /// # Errors
     ///
     /// Returns [`ProxyError::Bind`] if any address cannot be bound.
     pub async fn bind(snapshot: Snapshot) -> Result<Self, ProxyError> {
+        Self::bind_with(snapshot, Arc::new(Telemetry::default())).await
+    }
+
+    /// Like [`Proxy::bind`], reporting through `telemetry`. Registers a
+    /// collector for live state (endpoint health, pools, breakers, config
+    /// version) with its metrics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProxyError::Bind`] if any address cannot be bound.
+    pub async fn bind_with(
+        snapshot: Snapshot,
+        telemetry: Arc<Telemetry>,
+    ) -> Result<Self, ProxyError> {
         let mut listeners = Vec::with_capacity(snapshot.listeners().len());
         let mut bound = Vec::with_capacity(snapshot.listeners().len());
         for (i, l) in snapshot.listeners().iter().enumerate() {
@@ -181,15 +211,28 @@ impl Proxy {
         let prepared = prepare(&snapshot, None, &bound)?;
         let shared = Arc::new_cyclic(|weak: &Weak<Shared>| {
             let mut control = Control::default();
-            let runtime = control.build(snapshot, None, &bound, &pools, weak, &prepared);
+            let runtime = control.build(
+                snapshot,
+                None,
+                &bound,
+                &pools,
+                weak,
+                &prepared,
+                &telemetry.metrics,
+            );
             Shared {
                 runtime: ArcSwap::from_pointee(runtime),
                 draining: AtomicBool::new(false),
                 control: Mutex::new(control),
                 pools,
                 bound,
+                telemetry: Arc::clone(&telemetry),
             }
         });
+        telemetry
+            .metrics
+            .register_collector(Box::new(StateCollector::new(Arc::downgrade(&shared))));
+        telemetry.metrics.proxy().mark_loaded();
         // A checker could have flipped an endpoint before `shared` existed.
         shared.refresh_all();
         Ok(Self { shared, listeners })
@@ -278,9 +321,33 @@ impl ReloadHandle {
     /// certificates cannot be loaded.
     pub fn swap(&self, snapshot: Snapshot) -> Result<(), ProxyError> {
         let version = snapshot.version();
-        self.shared.install(snapshot)?;
+        let result = self.shared.install(snapshot);
+        self.shared.telemetry.metrics.proxy().reload(result.is_ok());
+        result?;
         info!(%version, "snapshot swapped");
         Ok(())
+    }
+
+    /// Counts a config change rejected before it reached [`ReloadHandle::swap`]
+    /// (it did not parse or validate).
+    pub fn rejected(&self) {
+        self.shared.telemetry.metrics.proxy().reload(false);
+    }
+
+    /// The telemetry this proxy reports through.
+    #[must_use]
+    pub fn telemetry(&self) -> &Arc<Telemetry> {
+        &self.shared.telemetry
+    }
+
+    /// The snapshot currently serving new requests.
+    #[must_use]
+    pub fn snapshot(&self) -> Arc<Snapshot> {
+        Arc::clone(&self.shared.runtime.load().snapshot)
+    }
+
+    pub(crate) fn runtime(&self) -> Arc<Runtime> {
+        self.shared.runtime.load_full()
     }
 
     /// Whether shutdown has started.
@@ -402,6 +469,7 @@ async fn accept_loop(
                         continue;
                     };
                     let scheme = if listener.config.tls().is_some() { "https" } else { "http" };
+                    let stats = Arc::clone(&listener.stats);
                     let proxy_protocol = listener.config.proxy_protocol();
                     let tls = listener.tls.as_ref().map(|t| Arc::clone(&t.config));
                     let builder = match &cached {
@@ -417,7 +485,7 @@ async fn accept_loop(
                         peer,
                         scheme,
                     };
-                    let accepted = Accepted { from, proxy_protocol, tls };
+                    let accepted = Accepted { from, proxy_protocol, tls, stats };
                     serve(&shared, builder, &graceful, accepted, stream);
                 }
                 Err(e) => {
@@ -442,6 +510,7 @@ struct Accepted {
     from: Downstream,
     proxy_protocol: bool,
     tls: Option<Arc<rustls::ServerConfig>>,
+    stats: Arc<ListenerStats>,
 }
 
 fn serve(
@@ -455,6 +524,7 @@ fn serve(
         mut from,
         proxy_protocol,
         tls,
+        stats,
     } = accepted;
     if let Err(e) = stream.set_nodelay(true) {
         debug!(peer = %from.peer, error = %e, "set_nodelay failed");
@@ -463,23 +533,27 @@ fn serve(
     let builder = builder.clone();
     let watcher = graceful.watcher();
     tokio::spawn(async move {
+        let _open = stats.open_connection();
         // PROXY header first (the NLB sends it before anything else), then TLS.
         if proxy_protocol {
             match proxy_protocol::read_header(&mut stream, from.peer).await {
                 Ok(client) => from.peer = client,
                 Err(e) => {
+                    stats.proxy_protocol_errors.inc();
                     debug!(peer = %from.peer, error = %e, "rejected connection without a valid PROXY header");
                     return;
                 }
             }
         }
+        let tls_errors = Arc::clone(&stats);
         let service = service_fn(move |req: Request<Incoming>| {
             // One load per request: the request keeps this snapshot until it completes.
             let runtime = shared.runtime.load_full();
+            let telemetry = Arc::clone(&shared.telemetry);
             let shared = Arc::clone(&shared);
             let http1 = req.version() < Version::HTTP_2;
             async move {
-                let mut resp = handle(runtime, from, req).await?;
+                let mut resp = handle(runtime, telemetry, from, req).await?;
                 if http1
                     && shared.draining.load(Ordering::Relaxed)
                     && resp.status() != StatusCode::SWITCHING_PROTOCOLS
@@ -501,10 +575,12 @@ fn serve(
                     match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
                         Ok(Ok(s)) => s,
                         Ok(Err(e)) => {
+                            tls_errors.tls_errors.inc();
                             debug!(peer = %from.peer, error = %e, "TLS handshake failed");
                             return;
                         }
                         Err(_) => {
+                            tls_errors.tls_errors.inc();
                             debug!(peer = %from.peer, "TLS handshake timed out");
                             return;
                         }

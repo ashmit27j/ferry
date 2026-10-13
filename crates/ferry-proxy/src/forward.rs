@@ -27,10 +27,14 @@ use crate::body::{
     BodyTooLarge, BoxError, IdleTimeout, ProxyBody, RequestBody, Tracked, UpstreamBody, caused_by,
 };
 use crate::grpc;
+use crate::observe::{Exchange, Observed, UpstreamLog};
 use crate::router::{RequestInfo, normalize_host};
 use crate::state::{ClusterRuntime, Runtime, hash_key, set_cookie};
 use ferry_lb::pool::PoolError;
 use ferry_lb::{Outcome, Permit, RequestGuard};
+use ferry_telemetry::Telemetry;
+use ferry_telemetry::metrics::{Breaker, Reason};
+use ferry_telemetry::trace::{Attribute, ServerSpan, Tracing};
 use hyper::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
 
@@ -76,32 +80,59 @@ const MAX_REQUEST_ID_LEN: usize = 128;
 /// Handles one downstream request.
 pub(crate) async fn handle(
     runtime: Arc<Runtime>,
+    telemetry: Arc<Telemetry>,
     from: Downstream,
     req: Request<Incoming>,
-) -> Result<Response<ProxyBody>, Infallible> {
-    Ok(proxy(&runtime, from, req).await)
+) -> Result<Response<Observed>, Infallible> {
+    let mut ex = Exchange::start(
+        Arc::clone(&runtime),
+        Arc::clone(&telemetry),
+        from.listener,
+        from.peer,
+        req.headers(),
+        req.method(),
+    );
+    ex.capture(&req, from.scheme);
+    let resp = proxy(&runtime, telemetry.tracing.as_ref(), from, req, &mut ex).await;
+    Ok(ex.respond(resp))
 }
 
 async fn proxy(
     runtime: &Runtime,
+    tracing: Option<&Tracing>,
     from: Downstream,
     mut req: Request<Incoming>,
+    ex: &mut Exchange,
 ) -> Response<ProxyBody> {
     let grpc = grpc::is_grpc(req.headers());
-    let fail = |status, message| error_reply(grpc, status, message);
+    let fail = |ex: &mut Exchange, reason, status, message| {
+        ex.local(reason);
+        error_reply(grpc, status, message)
+    };
     let Some(listener) = runtime
         .listeners
         .get(from.listener)
         .and_then(Option::as_ref)
     else {
-        return fail(StatusCode::SERVICE_UNAVAILABLE, "listener removed");
+        return fail(
+            ex,
+            Reason::Misconfigured,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "listener removed",
+        );
     };
     let router = &listener.router;
     let body_limit = listener.config.limits().max_request_body_bytes();
     if let Some(limit) = body_limit
         && content_length(req.headers()).is_some_and(|len| len > limit)
     {
-        return fail(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
+        ex.unrouted();
+        ex.local(Reason::BodyTooLarge);
+        return error_reply(
+            grpc,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request body too large",
+        );
     }
     let host = request_host(&req).unwrap_or_default();
     let info = RequestInfo {
@@ -113,9 +144,12 @@ async fn proxy(
     };
     let Some(decision) = router.route(&info) else {
         debug!(host, path = req.uri().path(), "no route");
-        return fail(StatusCode::NOT_FOUND, "no route");
+        ex.unrouted();
+        ex.local(Reason::NoRoute);
+        return error_reply(grpc, StatusCode::NOT_FOUND, "no route");
     };
     let rule = decision.rule;
+    ex.routed(decision.route_index, req.method());
 
     if let Some(limiter) = listener
         .rate_limiters
@@ -123,7 +157,12 @@ async fn proxy(
         .and_then(Option::as_ref)
         && let Err(limited) = limiter.check(from.peer.ip(), req.headers())
     {
-        let mut resp = fail(StatusCode::TOO_MANY_REQUESTS, "rate limited");
+        let mut resp = fail(
+            ex,
+            Reason::RateLimited,
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate limited",
+        );
         let secs =
             limited.retry_after.as_secs() + u64::from(limited.retry_after.subsec_nanos() > 0);
         resp.headers_mut()
@@ -156,13 +195,21 @@ async fn proxy(
 
     let Some(cluster_id) = decision.cluster else {
         return fail(
+            ex,
+            Reason::Misconfigured,
             StatusCode::INTERNAL_SERVER_ERROR,
             "all backends have zero weight",
         );
     };
     let Some(cluster) = runtime.cluster(cluster_id) else {
-        return fail(StatusCode::INTERNAL_SERVER_ERROR, "unknown cluster");
+        return fail(
+            ex,
+            Reason::Misconfigured,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unknown cluster",
+        );
     };
+    ex.cluster = Some(cluster_id);
     let route_name = decision.route;
     let matched_path = decision.matched.path();
     let filters = rule.filters();
@@ -186,6 +233,7 @@ async fn proxy(
             .insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
     }
     let request_id = set_edge_headers(&mut parts.headers, from);
+    ex.forwarded(&parts.headers);
     if wants_trailers {
         // The one TE value HTTP/2 allows, and the one gRPC requires.
         parts
@@ -217,7 +265,14 @@ async fn proxy(
                 if let Some(p) = rw.path() {
                     match rewrite_path(&path_and_query, p, matched_path) {
                         Some(pq) => path_and_query = pq,
-                        None => return fail(StatusCode::BAD_REQUEST, "bad rewritten path"),
+                        None => {
+                            return fail(
+                                ex,
+                                Reason::BadRequest,
+                                StatusCode::BAD_REQUEST,
+                                "bad rewritten path",
+                            );
+                        }
                     }
                 }
             }
@@ -243,12 +298,14 @@ async fn proxy(
         per_try: timeouts.backend_request(),
         idle: timeouts.idle(),
         policy,
+        trace: tracing.zip(ex.span.as_ref()),
     };
+    let log = &mut ex.upstream;
     let run = async {
         let mut upstream =
             UpstreamRequest::new(parts, path_and_query, cluster, body, policy).await?;
         upstream.on_upgrade = on_upgrade;
-        attempts.run(upstream).await
+        attempts.run(upstream, log).await
     };
     let result = match deadline {
         Some(d) => tokio::time::timeout(d, run)
@@ -265,6 +322,7 @@ async fn proxy(
                 error = %failure,
                 "upstream request failed",
             );
+            ex.local(failure.reason());
             return failure.into_response(grpc);
         }
     };
@@ -469,6 +527,20 @@ enum Failure {
 }
 
 impl Failure {
+    fn reason(&self) -> Reason {
+        match self {
+            Self::NoHealthyUpstream => Reason::NoHealthyUpstream,
+            Self::Send(e) if caused_by::<BodyTooLarge>(e) => Reason::BodyTooLarge,
+            Self::RequestBody(e) if caused_by::<BodyTooLarge>(e.as_ref()) => Reason::BodyTooLarge,
+            Self::Send(e) if caused_by::<IdleTimeout>(e) => Reason::BodyTimeout,
+            Self::RequestBody(e) if caused_by::<IdleTimeout>(e.as_ref()) => Reason::BodyTimeout,
+            Self::RequestBody(_) | Self::BadRequest => Reason::BadRequest,
+            Self::Pool(_) | Self::Send(_) => Reason::UpstreamFailure,
+            Self::Timeout => Reason::Timeout,
+            Self::Overflow => Reason::Overflow,
+        }
+    }
+
     fn into_response(self, grpc: bool) -> Response<ProxyBody> {
         let (status, message) = match &self {
             Self::NoHealthyUpstream => (StatusCode::SERVICE_UNAVAILABLE, "no healthy upstream"),
@@ -516,6 +588,8 @@ struct Attempts<'a> {
     per_try: Option<Duration>,
     idle: Duration,
     policy: Option<&'a RetryPolicy>,
+    /// The tracer and the request's server span, when tracing is on.
+    trace: Option<(&'a Tracing, &'a ServerSpan)>,
 }
 
 impl Attempts<'_> {
@@ -540,10 +614,23 @@ impl Attempts<'_> {
                     cluster = self.cluster.config.name(),
                     "retry circuit breaker open"
                 );
+                self.cluster.stats.overflow(Breaker::Retries);
                 return false;
             }
         }
-        self.cluster.budget.try_withdraw()
+        let allowed = self.cluster.budget.try_withdraw();
+        if !allowed {
+            self.cluster.stats.budget_exhausted.inc();
+        }
+        allowed
+    }
+
+    /// Backs off before policy retry number `retry`, counting the wait as
+    /// upstream time.
+    async fn pause(&self, retry: u32, log: &mut UpstreamLog) {
+        log.begin();
+        self.backoff(retry).await;
+        log.end();
     }
 
     async fn backoff(&self, retry: u32) {
@@ -561,8 +648,13 @@ impl Attempts<'_> {
         tokio::time::sleep(cap.mul_f64(fastrand::f64())).await;
     }
 
-    async fn run(&self, mut req: UpstreamRequest) -> Result<Response<ProxyBody>, Failure> {
+    async fn run(
+        &self,
+        mut req: UpstreamRequest,
+        log: &mut UpstreamLog,
+    ) -> Result<Response<ProxyBody>, Failure> {
         let cluster = self.cluster;
+        let stats = &cluster.stats;
         cluster.budget.deposit();
         let policy_max = self.policy.map_or(0, RetryPolicy::attempts);
         let max = (1 + policy_max as usize).clamp(MAX_ATTEMPTS, MAX_TOTAL_ATTEMPTS);
@@ -583,10 +675,16 @@ impl Attempts<'_> {
             ) else {
                 break;
             };
+            log.attempts += 1;
+            if attempt > 0 {
+                stats.retries.inc();
+            }
             let Some(request_slot) = cluster.breakers.requests.try_acquire() else {
+                stats.overflow(Breaker::Requests);
                 return Err(Failure::Overflow);
             };
             let Some(pending_slot) = cluster.breakers.pending.try_acquire() else {
+                stats.overflow(Breaker::Pending);
                 return Err(Failure::Overflow);
             };
             let guard = host.state.start_request();
@@ -599,9 +697,13 @@ impl Attempts<'_> {
             drop(pending_slot);
             let conn = match checkout {
                 Ok(c) => c,
-                Err(PoolError::Overflow { .. }) => return Err(Failure::Overflow),
+                Err(PoolError::Overflow { .. }) => {
+                    stats.overflow(Breaker::Connections);
+                    return Err(Failure::Overflow);
+                }
                 Err(e) => {
                     // Nothing was sent: always safe to try elsewhere.
+                    stats.connect_failures.inc();
                     guard.observe_failure();
                     cluster.balancer.record(index, Outcome::GatewayFailure);
                     debug!(endpoint = %host.state.address(), attempt, error = %e, "connect failed; trying another endpoint");
@@ -609,16 +711,41 @@ impl Attempts<'_> {
                     continue;
                 }
             };
-            let Some(request) = req.pending.take().or_else(|| req.replay()) else {
+            let Some(mut request) = req.pending.take().or_else(|| req.replay()) else {
                 break;
             };
+            let endpoint = host.state.address();
+            log.endpoint = Some(endpoint);
+            let span = self.trace.map(|(tracer, parent)| {
+                let span = tracer.client_span(parent, request.method().as_str());
+                let mut attrs = vec![
+                    Attribute::new("server.address", endpoint.ip().to_string()),
+                    Attribute::new("server.port", i64::from(endpoint.port())),
+                    Attribute::new("ferry.cluster", cluster.config.name().to_owned()),
+                ];
+                if attempt > 0 {
+                    attrs.push(Attribute::new(
+                        "http.request.resend_count",
+                        i64::try_from(attempt).unwrap_or(i64::MAX),
+                    ));
+                }
+                span.set_attributes(attrs);
+                tracer.inject(&span, request.headers_mut());
+                span
+            });
+            log.begin();
             let sent = match self.per_try {
                 Some(t) => tokio::time::timeout(t, conn.send(request)).await.ok(),
                 None => Some(conn.send(request).await),
             };
+            let latency = log.end();
             match sent {
                 Some(Ok(mut resp)) => {
                     guard.observe_response();
+                    stats.response(resp.status().as_u16(), latency);
+                    if let Some(span) = &span {
+                        span.end_status(resp.status().as_u16());
+                    }
                     if resp.status() == StatusCode::SWITCHING_PROTOCOLS
                         && let Some(downstream) = req.on_upgrade.take()
                     {
@@ -649,7 +776,7 @@ impl Attempts<'_> {
                         policy_retries += 1;
                         debug!(endpoint = %host.state.address(), status = %resp.status(), attempt, "retrying on status");
                         drop(resp);
-                        self.backoff(policy_retries).await;
+                        self.pause(policy_retries, log).await;
                         continue;
                     }
                     let (mut parts, body) = resp.into_parts();
@@ -660,6 +787,10 @@ impl Attempts<'_> {
                     ));
                 }
                 Some(Err(mut e)) => {
+                    stats.resets.inc();
+                    if let Some(span) = &span {
+                        span.end_error("reset");
+                    }
                     guard.observe_failure();
                     cluster.balancer.record(index, Outcome::GatewayFailure);
                     let unsent = e.take_message();
@@ -675,13 +806,17 @@ impl Attempts<'_> {
                         && self.policy_allows(502, policy_retries, &req, &mut retry_slot)
                     {
                         policy_retries += 1;
-                        self.backoff(policy_retries).await;
+                        self.pause(policy_retries, log).await;
                     } else {
                         return Err(Failure::Send(error));
                     }
                     last = Failure::Send(error);
                 }
                 None => {
+                    stats.attempt_timeouts.inc();
+                    if let Some(span) = &span {
+                        span.end_error("timeout");
+                    }
                     guard.observe_failure();
                     cluster.balancer.record(index, Outcome::GatewayFailure);
                     debug!(endpoint = %host.state.address(), attempt, "upstream attempt timed out");
@@ -689,7 +824,7 @@ impl Attempts<'_> {
                         && self.policy_allows(504, policy_retries, &req, &mut retry_slot)
                     {
                         policy_retries += 1;
-                        self.backoff(policy_retries).await;
+                        self.pause(policy_retries, log).await;
                         last = Failure::Timeout;
                         continue;
                     }

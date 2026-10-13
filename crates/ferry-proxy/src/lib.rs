@@ -12,10 +12,13 @@
 //! or h2c upstream, retrying on another endpoint when the request provably
 //! never arrived. TLS, timeouts and configurable retries land in M2.
 
+pub mod admin;
 mod body;
+mod collector;
 mod error;
 mod forward;
 mod grpc;
+mod observe;
 pub mod proxy_protocol;
 mod ratelimit;
 pub mod router;

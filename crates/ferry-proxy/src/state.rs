@@ -31,6 +31,8 @@ use ferry_lb::pool::{Pool, PoolKey, PoolSet, Protocol, UpstreamTls};
 use ferry_lb::{
     CircuitBreakers, ClusterBalancer, EndpointState, Host, OutlierConfig, Policy, RetryBudget,
 };
+use ferry_telemetry::Metrics;
+use ferry_telemetry::metrics::{ClusterStats, ListenerStats, NO_ROUTE, RouteStats};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -60,6 +62,12 @@ pub(crate) struct ListenerRuntime {
     pub(crate) rate_limiters: Vec<Option<Arc<RateLimiter>>>,
     /// TLS acceptor state, for TLS listeners.
     pub(crate) tls: Option<Arc<ServerTls>>,
+    /// Connection, local-reply and added-latency metrics.
+    pub(crate) stats: Arc<ListenerStats>,
+    /// Parallel to `config.routes()`.
+    pub(crate) route_stats: Vec<Arc<RouteStats>>,
+    /// Requests that matched no route.
+    pub(crate) unmatched: Arc<RouteStats>,
 }
 
 /// Builds the TLS client configuration of every cluster that uses upstream
@@ -162,6 +170,8 @@ pub(crate) struct ClusterRuntime {
     pub(crate) breakers: CircuitBreakers,
     /// TLS to the endpoints, when configured.
     pub(crate) tls: Option<Arc<UpstreamTls>>,
+    /// Upstream request metrics.
+    pub(crate) stats: Arc<ClusterStats>,
 }
 
 impl Runtime {
@@ -192,7 +202,9 @@ pub(crate) trait HealthSink: Send + Sync + 'static {
 
 impl Control {
     /// Builds the runtime for `snapshot`, reusing what `prev` and the registry
-    /// already hold, and reconciles health checkers.
+    /// already hold, and reconciles health checkers. Metric handles come from
+    /// `metrics` by name, so they carry on across reloads.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn build<S: HealthSink>(
         &mut self,
         snapshot: Snapshot,
@@ -201,6 +213,7 @@ impl Control {
         pools: &PoolSet<UpstreamBody>,
         sink: &Weak<S>,
         prepared: &Prepared,
+        metrics: &Metrics,
     ) -> Runtime {
         let tls = &prepared.listener_tls;
         let upstream_tls = &prepared.upstream_tls;
@@ -230,7 +243,12 @@ impl Control {
                 });
                 match reused {
                     Some(old) => Arc::clone(old),
-                    None => Arc::new(self.cluster_runtime(c, pools, tls.cloned())),
+                    None => Arc::new(self.cluster_runtime(
+                        c,
+                        pools,
+                        tls.cloned(),
+                        metrics.cluster(c.name()),
+                    )),
                 }
             })
             .collect();
@@ -285,7 +303,15 @@ impl Control {
                         Some(kept.unwrap_or_else(|| Arc::new(RateLimiter::new(limit))))
                     })
                     .collect();
+                let name = listener.name();
                 Some(Arc::new(ListenerRuntime {
+                    stats: metrics.listener(name),
+                    route_stats: listener
+                        .routes()
+                        .iter()
+                        .map(|r| metrics.route(name, r.name()))
+                        .collect(),
+                    unmatched: metrics.route(name, NO_ROUTE),
                     config: listener.clone(),
                     router,
                     rate_limiters,
@@ -305,6 +331,27 @@ impl Control {
 
         self.endpoints.retain(|k, _| used_endpoints.contains(k));
         pools.retain(&used_pools);
+        metrics.retain(
+            &snapshot
+                .listeners()
+                .iter()
+                .map(|l| l.name().to_owned())
+                .collect(),
+            &snapshot
+                .listeners()
+                .iter()
+                .flat_map(|l| {
+                    l.routes()
+                        .iter()
+                        .map(|r| (l.name().to_owned(), r.name().to_owned()))
+                })
+                .collect(),
+            &snapshot
+                .clusters()
+                .iter()
+                .map(|c| c.name().to_owned())
+                .collect(),
+        );
         self.reconcile_checks(desired_checks, &clusters, sink);
 
         Runtime {
@@ -327,6 +374,7 @@ impl Control {
         c: &Cluster,
         pools: &PoolSet<UpstreamBody>,
         tls: Option<Arc<UpstreamTls>>,
+        stats: Arc<ClusterStats>,
     ) -> ClusterRuntime {
         let hosts: Vec<Host> = c
             .endpoints()
@@ -353,6 +401,7 @@ impl Control {
         let cb = c.circuit_breakers();
         ClusterRuntime {
             tls,
+            stats,
             breakers: CircuitBreakers::new(
                 cb.max_connections(),
                 cb.max_pending_requests(),
@@ -594,6 +643,7 @@ clusters:
             &pools,
             &sink,
             &Prepared::default(),
+            &Metrics::new(),
         );
         let changed = BASE.replace("10.0.0.3:80", "10.0.0.4:80");
         let second = control.build(
@@ -603,6 +653,7 @@ clusters:
             &pools,
             &sink,
             &Prepared::default(),
+            &Metrics::new(),
         );
         assert!(Arc::ptr_eq(&first.clusters[0], &second.clusters[0]));
         assert!(!Arc::ptr_eq(&first.clusters[1], &second.clusters[1]));
@@ -626,6 +677,7 @@ clusters:
             &pools,
             &sink,
             &Prepared::default(),
+            &Metrics::new(),
         );
         let limited = BASE.replace(
             "address: 127.0.0.1:0,",
@@ -638,6 +690,7 @@ clusters:
             &pools,
             &sink,
             &Prepared::default(),
+            &Metrics::new(),
         );
         let (a, b) = (
             first.listeners[0].as_ref().unwrap(),
@@ -660,6 +713,7 @@ clusters:
             &pools,
             &sink,
             &Prepared::default(),
+            &Metrics::new(),
         );
         let guard = first.clusters[0].balancer.hosts()[0].state.start_request();
         let changed = BASE.replace(
@@ -673,6 +727,7 @@ clusters:
             &pools,
             &sink,
             &Prepared::default(),
+            &Metrics::new(),
         );
         assert!(!Arc::ptr_eq(&first.clusters[0], &second.clusters[0]));
         assert_eq!(
@@ -706,6 +761,7 @@ clusters:
             &pools,
             &sink,
             &Prepared::default(),
+            &Metrics::new(),
         );
         assert_eq!(control.checker_count(), 2);
         let second = control.build(
@@ -715,6 +771,7 @@ clusters:
             &pools,
             &sink,
             &Prepared::default(),
+            &Metrics::new(),
         );
         assert_eq!(control.checker_count(), 0);
         drop(second);
@@ -731,7 +788,15 @@ clusters:
             name: "gone".into(),
             addr: "127.0.0.1:2".parse().unwrap(),
         });
-        let rt = control.build(snap(BASE), None, &b, &pools, &sink, &Prepared::default());
+        let rt = control.build(
+            snap(BASE),
+            None,
+            &b,
+            &pools,
+            &sink,
+            &Prepared::default(),
+            &Metrics::new(),
+        );
         assert!(rt.listeners[0].is_some());
         assert!(rt.listeners[1].is_none());
     }
