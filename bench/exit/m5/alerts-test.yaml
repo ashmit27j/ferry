@@ -1,0 +1,230 @@
+# promtool unit tests for deploy/helm/ferry/files/alerts.yaml.
+# Run: bench/exit/m5/alerts-test.sh (promtool in Docker).
+rule_files:
+  - alerts.rendered.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # Two healthy hours, then 5% of a route's responses are 5xx. The fast
+  # (5m and 1h) window pages once the error minutes outweigh 0.72% of the
+  # hour; the slow (30m and 6h) window warns later, after its 15m `for`.
+  - interval: 1m
+    input_series:
+      - series: 'ferry_requests_total{fleet="ferry-apps-gw",pod="p0",listener="http",route="r",code_class="2xx"}'
+        values: '0+100x120 12000+95x120'
+      - series: 'ferry_requests_total{fleet="ferry-apps-gw",pod="p0",listener="http",route="r",code_class="5xx"}'
+        values: '0x120 0+5x120'
+      - series: 'ferry_requests_total{fleet="ferry-apps-gw",pod="p0",listener="http",route="ok",code_class="2xx"}'
+        values: '0+100x240'
+      - series: 'ferry_requests_total{fleet="ferry-apps-gw",pod="p0",listener="http",route="ok",code_class="5xx"}'
+        values: '0x240'
+    alert_rule_test:
+      - eval_time: 125m
+        alertname: FerryHigh5xxRate
+        exp_alerts: []
+      - eval_time: 140m
+        alertname: FerryHigh5xxRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              fleet: ferry-apps-gw
+              route: r
+            exp_annotations:
+              summary: "Route r on ferry-apps-gw is failing"
+              description: "5% of responses on route r (ferry-apps-gw) are 5xx, burning the 99.95% SLO budget 14x too fast."
+              runbook_url: RUNBOOK_BASE/high-5xx.md
+      - eval_time: 230m
+        alertname: FerryHigh5xxRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              fleet: ferry-apps-gw
+              route: r
+            exp_annotations:
+              summary: "Route r on ferry-apps-gw is failing"
+              description: "5% of responses on route r (ferry-apps-gw) are 5xx, burning the 99.95% SLO budget 14x too fast."
+              runbook_url: RUNBOOK_BASE/high-5xx.md
+          - exp_labels:
+              severity: warning
+              fleet: ferry-apps-gw
+              route: r
+            exp_annotations:
+              summary: "Route r on ferry-apps-gw has elevated 5xx"
+              description: "5% of responses on route r (ferry-apps-gw) are 5xx, burning the 99.95% SLO budget 6x too fast."
+              runbook_url: RUNBOOK_BASE/high-5xx.md
+
+  # A third of a cluster ejected; another cluster with nothing eligible.
+  - interval: 1m
+    input_series:
+      - series: 'ferry_cluster_endpoints{fleet="ferry-apps-gw",pod="p0",cluster="web"}'
+        values: '3x20'
+      - series: 'ferry_cluster_ejected_endpoints{fleet="ferry-apps-gw",pod="p0",cluster="web"}'
+        values: '1x20'
+      - series: 'ferry_cluster_eligible_endpoints{fleet="ferry-apps-gw",pod="p0",cluster="web"}'
+        values: '2x20'
+      - series: 'ferry_cluster_endpoints{fleet="ferry-apps-gw",pod="p0",cluster="api"}'
+        values: '2x20'
+      - series: 'ferry_cluster_ejected_endpoints{fleet="ferry-apps-gw",pod="p0",cluster="api"}'
+        values: '0x20'
+      - series: 'ferry_cluster_eligible_endpoints{fleet="ferry-apps-gw",pod="p0",cluster="api"}'
+        values: '0x20'
+      # Scaled to zero: no endpoints at all is not this alert's business.
+      - series: 'ferry_cluster_endpoints{fleet="ferry-apps-gw",pod="p0",cluster="idle"}'
+        values: '0x20'
+      - series: 'ferry_cluster_eligible_endpoints{fleet="ferry-apps-gw",pod="p0",cluster="idle"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: FerryBackendsEjected
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: FerryBackendsEjected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              fleet: ferry-apps-gw
+              cluster: web
+            exp_annotations:
+              summary: "web has ejected endpoints"
+              description: "Outlier detection has ejected 33.33% of cluster web's endpoints on ferry-apps-gw for 5 minutes."
+              runbook_url: RUNBOOK_BASE/backends-ejected.md
+      - eval_time: 10m
+        alertname: FerryNoEligibleBackends
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              fleet: ferry-apps-gw
+              cluster: api
+            exp_annotations:
+              summary: "api has no eligible endpoints"
+              description: "Every endpoint of cluster api on ferry-apps-gw is unhealthy or ejected; its routes answer 503."
+              runbook_url: RUNBOOK_BASE/backends-ejected.md
+
+  # Certificates: 10 days left warns, 3 days left is critical, 60 days is fine.
+  # time() is 0 at the start of a test.
+  - interval: 1m
+    input_series:
+      - series: 'ferry_tls_certificate_expiry_timestamp_seconds{fleet="ferry-apps-gw",pod="p0",kind="listener",owner="https",name="shop.example.com"}'
+        values: '864000x180'
+      - series: 'ferry_tls_certificate_expiry_timestamp_seconds{fleet="ferry-apps-gw",pod="p0",kind="controller",owner="snapshot-stream",name="ferry-proxy"}'
+        values: '259200x180'
+      - series: 'ferry_tls_certificate_expiry_timestamp_seconds{fleet="ferry-apps-gw",pod="p0",kind="upstream",owner="payments",name="client.example.com"}'
+        values: '5184000x180'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: FerryCertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              fleet: ferry-apps-gw
+              kind: listener
+              owner: https
+              name: shop.example.com
+            exp_annotations:
+              summary: "Certificate shop.example.com expires in under 21 days"
+              description: "The listener certificate shop.example.com (https, ferry-apps-gw) expires in 9d 22h 0m 0s; renewal has not happened."
+              runbook_url: RUNBOOK_BASE/certificate-expiry.md
+          - exp_labels:
+              severity: warning
+              fleet: ferry-apps-gw
+              kind: controller
+              owner: snapshot-stream
+              name: ferry-proxy
+            exp_annotations:
+              summary: "Certificate ferry-proxy expires in under 21 days"
+              description: "The controller certificate ferry-proxy (snapshot-stream, ferry-apps-gw) expires in 2d 22h 0m 0s; renewal has not happened."
+              runbook_url: RUNBOOK_BASE/certificate-expiry.md
+      - eval_time: 2h
+        alertname: FerryCertificateExpiryCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              fleet: ferry-apps-gw
+              kind: controller
+              owner: snapshot-stream
+              name: ferry-proxy
+            exp_annotations:
+              summary: "Certificate ferry-proxy expires in under 7 days"
+              description: "The controller certificate ferry-proxy (snapshot-stream, ferry-apps-gw) expires in 2d 22h 0m 0s."
+              runbook_url: RUNBOOK_BASE/certificate-expiry.md
+
+  # A proxy rejects a snapshot at 5m; the controller counts a NACK at 30m.
+  - interval: 1m
+    input_series:
+      - series: 'ferry_config_reloads_total{fleet="ferry-apps-gw",pod="p0",result="failure"}'
+        values: '0x5 1x60'
+      - series: 'ferry_config_reloads_total{fleet="ferry-apps-gw",pod="p0",result="success"}'
+        values: '0+1x60'
+      - series: 'ferry_controller_snapshot_nacks_total{pod="ctl-0",gateway="apps/gw"}'
+        values: '0x30 1x30'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: FerryConfigRejected
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: FerryConfigRejected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              fleet: ferry-apps-gw
+              pod: p0
+            exp_annotations:
+              summary: "Ferry rejected a config change"
+              description: "Proxy p0 (ferry-apps-gw) rejected a snapshot in the last 10 minutes and serves its previous one."
+              runbook_url: RUNBOOK_BASE/config-rejected.md
+      - eval_time: 33m
+        alertname: FerryConfigRejected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              gateway: apps/gw
+            exp_annotations:
+              summary: "Ferry rejected a config change"
+              description: "A proxy of Gateway apps/gw rejected a snapshot in the last 10 minutes and serves its previous one."
+              runbook_url: RUNBOOK_BASE/config-rejected.md
+
+  # One proxy loses the controller for 10 minutes; a reconnect within a
+  # minute (a controller restart) does not alert.
+  - interval: 1m
+    input_series:
+      - series: 'ferry_controller_connected{fleet="ferry-apps-gw",pod="p0"}'
+        values: '1x5 0x10 1x5'
+      - series: 'ferry_controller_connected{fleet="ferry-apps-gw",pod="p1"}'
+        values: '1x5 0 1x14'
+      - series: 'ferry_controller_ready{pod="ctl-0"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 13m
+        alertname: FerryControllerDisconnected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              fleet: ferry-apps-gw
+              pod: p0
+            exp_annotations:
+              summary: "Proxy p0 lost the controller"
+              description: "Proxy p0 (ferry-apps-gw) has had no snapshot stream for 5 minutes; it serves its last snapshot and receives no changes."
+              runbook_url: RUNBOOK_BASE/controller-disconnected.md
+      - eval_time: 18m
+        alertname: FerryControllerDisconnected
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: FerryControllerDown
+        exp_alerts: []
+
+  # No controller is ready (one replica up but unsynced).
+  - interval: 1m
+    input_series:
+      - series: 'ferry_controller_ready{pod="ctl-0"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: FerryControllerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "No Ferry controller is ready"
+              description: "Prometheus has scraped no ready ferry-controller replica for 5 minutes. Proxies keep serving their last snapshots, but no changes reach them."
+              runbook_url: RUNBOOK_BASE/controller-disconnected.md

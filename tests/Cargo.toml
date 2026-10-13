@@ -83,6 +83,10 @@ path = "it/tracing.rs"
 name = "dashboard"
 path = "it/dashboard.rs"
 
+[[test]]
+name = "alerts"
+path = "it/alerts.rs"
+
 [dependencies]
 bytes.workspace = true
 ferry-config.workspace = true
@@ -95,6 +99,7 @@ http.workspace = true
 http-body-util.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 serde_json.workspace = true
+serde-saphyr.workspace = true
 prost.workspace = true
 regex.workspace = true
 tokio-tungstenite.workspace = true

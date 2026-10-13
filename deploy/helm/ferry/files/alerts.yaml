@@ -1,0 +1,136 @@
+# Ferry alerting rules (Prometheus rule groups).
+#
+# templates/prometheusrule.yaml wraps these in a PrometheusRule and replaces
+# RUNBOOK_BASE with metrics.prometheusRule.runbookBaseUrl. Each alert has a
+# runbook in docs/runbooks/; tests/it/alerts.rs checks the pages and metric
+# names, and bench/exit/m5/alerts-test.yaml unit-tests the rules with
+# promtool.
+#
+# Labels: proxies carry `fleet` (their Deployment, ferry-<gw-ns>-<gw>, from
+# the PodMonitor) and `pod`; the controller's series carry `pod`.
+groups:
+  - name: ferry.slo
+    rules:
+      # Multi-window burn rate on the 99.95% success SLO (error budget
+      # 0.05%): 14.4x over 5m and 1h pages; 6x over 30m and 6h warns.
+      - alert: FerryHigh5xxRate
+        expr: |
+          (
+            sum by (fleet, route) (rate(ferry_requests_total{code_class="5xx"}[5m]))
+              / sum by (fleet, route) (rate(ferry_requests_total[5m]))
+          ) > (14.4 * 0.0005)
+          and
+          (
+            sum by (fleet, route) (rate(ferry_requests_total{code_class="5xx"}[1h]))
+              / sum by (fleet, route) (rate(ferry_requests_total[1h]))
+          ) > (14.4 * 0.0005)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Route {{ $labels.route }} on {{ $labels.fleet }} is failing"
+          description: "{{ $value | humanizePercentage }} of responses on route {{ $labels.route }} ({{ $labels.fleet }}) are 5xx, burning the 99.95% SLO budget 14x too fast."
+          runbook_url: RUNBOOK_BASE/high-5xx.md
+      - alert: FerryHigh5xxRate
+        expr: |
+          (
+            sum by (fleet, route) (rate(ferry_requests_total{code_class="5xx"}[30m]))
+              / sum by (fleet, route) (rate(ferry_requests_total[30m]))
+          ) > (6 * 0.0005)
+          and
+          (
+            sum by (fleet, route) (rate(ferry_requests_total{code_class="5xx"}[6h]))
+              / sum by (fleet, route) (rate(ferry_requests_total[6h]))
+          ) > (6 * 0.0005)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Route {{ $labels.route }} on {{ $labels.fleet }} has elevated 5xx"
+          description: "{{ $value | humanizePercentage }} of responses on route {{ $labels.route }} ({{ $labels.fleet }}) are 5xx, burning the 99.95% SLO budget 6x too fast."
+          runbook_url: RUNBOOK_BASE/high-5xx.md
+
+  - name: ferry.backends
+    rules:
+      - alert: FerryBackendsEjected
+        expr: |
+          max by (fleet, cluster) (ferry_cluster_ejected_endpoints / ferry_cluster_endpoints) >= 0.33
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.cluster }} has ejected endpoints"
+          description: "Outlier detection has ejected {{ $value | humanizePercentage }} of cluster {{ $labels.cluster }}'s endpoints on {{ $labels.fleet }} for 5 minutes."
+          runbook_url: RUNBOOK_BASE/backends-ejected.md
+      - alert: FerryNoEligibleBackends
+        expr: |
+          min by (fleet, cluster) (ferry_cluster_eligible_endpoints) == 0
+          and on (fleet, cluster)
+          max by (fleet, cluster) (ferry_cluster_endpoints) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.cluster }} has no eligible endpoints"
+          description: "Every endpoint of cluster {{ $labels.cluster }} on {{ $labels.fleet }} is unhealthy or ejected; its routes answer 503."
+          runbook_url: RUNBOOK_BASE/backends-ejected.md
+
+  - name: ferry.certificates
+    rules:
+      - alert: FerryCertificateExpiringSoon
+        expr: |
+          min by (fleet, kind, owner, name) (ferry_tls_certificate_expiry_timestamp_seconds) - time() < 21 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Certificate {{ $labels.name }} expires in under 21 days"
+          description: "The {{ $labels.kind }} certificate {{ $labels.name }} ({{ $labels.owner }}, {{ $labels.fleet }}) expires in {{ $value | humanizeDuration }}; renewal has not happened."
+          runbook_url: RUNBOOK_BASE/certificate-expiry.md
+      - alert: FerryCertificateExpiryCritical
+        expr: |
+          min by (fleet, kind, owner, name) (ferry_tls_certificate_expiry_timestamp_seconds) - time() < 7 * 86400
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Certificate {{ $labels.name }} expires in under 7 days"
+          description: "The {{ $labels.kind }} certificate {{ $labels.name }} ({{ $labels.owner }}, {{ $labels.fleet }}) expires in {{ $value | humanizeDuration }}."
+          runbook_url: RUNBOOK_BASE/certificate-expiry.md
+
+  - name: ferry.config
+    rules:
+      - alert: FerryConfigRejected
+        expr: |
+          sum by (fleet, pod) (increase(ferry_config_reloads_total{result="failure"}[10m])) > 0
+          or
+          sum by (gateway) (increase(ferry_controller_snapshot_nacks_total[10m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ferry rejected a config change"
+          description: "{{ if $labels.pod }}Proxy {{ $labels.pod }} ({{ $labels.fleet }}){{ else }}A proxy of Gateway {{ $labels.gateway }}{{ end }} rejected a snapshot in the last 10 minutes and serves its previous one."
+          runbook_url: RUNBOOK_BASE/config-rejected.md
+
+  - name: ferry.controller
+    rules:
+      - alert: FerryControllerDisconnected
+        expr: |
+          max by (fleet, pod) (ferry_controller_connected) == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Proxy {{ $labels.pod }} lost the controller"
+          description: "Proxy {{ $labels.pod }} ({{ $labels.fleet }}) has had no snapshot stream for 5 minutes; it serves its last snapshot and receives no changes."
+          runbook_url: RUNBOOK_BASE/controller-disconnected.md
+      - alert: FerryControllerDown
+        expr: |
+          absent(ferry_controller_ready == 1)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No Ferry controller is ready"
+          description: "Prometheus has scraped no ready ferry-controller replica for 5 minutes. Proxies keep serving their last snapshots, but no changes reach them."
+          runbook_url: RUNBOOK_BASE/controller-disconnected.md

@@ -1,0 +1,15 @@
+{{- if and .Values.metrics.prometheusRule.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/PrometheusRule") }}
+{{- $rules := .Files.Get "files/alerts.yaml" | replace "RUNBOOK_BASE" (trimSuffix "/" .Values.metrics.prometheusRule.runbookBaseUrl) | fromYaml }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "ferry.fullname" . }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    {{- toYaml $rules.groups | nindent 4 }}
+{{- end }}

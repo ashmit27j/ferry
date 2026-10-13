@@ -40,4 +40,24 @@ spec:
     - port: admin
       path: /metrics
       interval: {{ .Values.metrics.podMonitor.interval }}
+      relabelings:
+        # One fleet per Gateway: alerts and dashboards group by it.
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+          targetLabel: fleet
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "ferry.controller" . }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ferry-controller
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  podMetricsEndpoints:
+    - port: health
+      path: /metrics
+      interval: {{ .Values.metrics.podMonitor.interval }}
 {{- end }}

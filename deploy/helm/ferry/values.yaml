@@ -86,7 +86,29 @@ proxy:
   otlpEndpoint: ""
 
 metrics:
-  # A PodMonitor for kube-prometheus-stack (proxies serve /metrics on 19001).
+  # PodMonitors for kube-prometheus-stack: proxies serve /metrics on 19001,
+  # the controller on 18001.
   podMonitor:
     enabled: true
     interval: 15s
+  # Alerting rules (files/alerts.yaml) as a PrometheusRule; each alert links
+  # to its runbook under runbookBaseUrl.
+  prometheusRule:
+    enabled: true
+    runbookBaseUrl: https://github.com/ashmit27j/ferry/blob/main/docs/runbooks
+    # Extra labels, e.g. the `release` label your Prometheus selects rules by.
+    labels: {}
+
+# NetworkPolicies: only proxies may open the controller's snapshot stream,
+# and only `metricsFrom` may reach the admin and health ports. Proxy
+# listener ports stay open to all sources (the NLB sends client traffic
+# straight to pod IPs). The controller renders each fleet's policy.
+networkPolicy:
+  enabled: true
+  # NetworkPolicy peers allowed to scrape metrics (proxy 19001, controller
+  # 18001). Kubelet probes are not affected. The default admits every pod
+  # in the cluster; narrow it to your monitoring namespace, e.g.
+  #   - namespaceSelector:
+  #       matchLabels: { kubernetes.io/metadata.name: monitoring }
+  metricsFrom:
+    - namespaceSelector: {}
