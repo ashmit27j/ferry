@@ -954,6 +954,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "ferry-config",
+ "ferry-controller",
  "ferry-lb",
  "ferry-proxy",
  "ferry-telemetry",
