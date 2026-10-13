@@ -25,12 +25,20 @@ cargo bench -p ferry-bench                    # criterion; record in bench/RESUL
 cargo +nightly fuzz run config_yaml fuzz/corpus/config_yaml fuzz/seeds/config_yaml   # nightly + cargo-fuzz, Linux/macOS
 bench/exit/run-m1.sh                          # M1 exit test in Docker (see bench/README.md)
 bench/exit/run-m3.sh                          # M3 exit: Prometheus/Grafana/Tempo stack, SLO + trace checks
+FRESH=1 bench/exit/run-m4.sh                  # M4 exit: new kind cluster + MetalLB, helm install, smoke, conformance
+EXTENDED=1 PHASES=conformance bench/exit/run-m4.sh   # conformance with the extended features claimed
+cargo bench -p ferry-bench --bench controller # translation and snapshot serialisation
+python crates/ferry-controller/gen/gateway_api.py v1.6.3 --crds   # regenerate Gateway API types + chart CRDs
+cargo run -p ferry -- crds > deploy/helm/ferry/crds/ferrypolicies.yaml  # after changing FerryPolicy (a test checks)
+docker build -t ferry:dev .                   # distroless image: proxy, controller, certgen
 python deploy/grafana/generate.py deploy/grafana/ferry-dashboard.json   # then: cargo nextest run --test dashboard
 
 cargo run -p ferry -- proxy --config examples/hello.yaml       # reloads the file on change
 cargo run -p ferry -- check-config examples/gateway.yaml       # routing and balancing
 cargo run -p ferry -- check-config examples/edge.yaml          # TLS, limits, resilience
 cargo run -p ferry -- check-config --output json --print examples/hello.yaml
+cargo run -p ferry -- proxy --controller https://ctl:18000 --gateway ns/gw --controller-tls-dir dir   # K8s mode
+cargo run -p ferry -- controller --no-leader-election --proxy-template t.yaml   # needs a kubeconfig
 cargo run -p ferry-testkit --bin mock-backend -- --name a --http 127.0.0.1:9001 --grpc 127.0.0.1:9101 --ws 127.0.0.1:9201
 cargo run -p ferry-testkit --bin trace-client -- --url http://127.0.0.1:8080/ --otlp-endpoint http://127.0.0.1:4317
 curl localhost:9901/metrics                   # admin API: /live /ready /metrics /config /clusters
@@ -53,6 +61,14 @@ binary pass `--admin-address off` (or a free port) so they do not collide.
 ## Architecture (as built)
 
 ```
+Kubernetes (ferry-controller, every replica):
+  reflectors (GatewayClass, Gateway, HTTPRoute, GRPCRoute, ReferenceGrant, Service,
+  EndpointSlice, TLS Secret, Namespace, FerryPolicy, own Deployments) ─▶ notify
+  ─▶ debounce 200 ms (or 30 s resync) ─▶ World ─▶ translate() (pure) ─▶ Translation
+     ├─ per Gateway: Config (rate limits ÷ ready replicas) ─▶ Hub::publish (if changed)
+     │     ─▶ SnapshotService stream (mTLS) ─▶ proxy: parse+validate, swap, ACK | NACK
+     └─ leader only (Lease): status patches (only if changed) + fleet SSA
+        (Deployment, Service, PDB, HPA per Gateway, in the controller namespace)
 YAML ──ferry-config──▶ Config ──into_snapshot()──▶ Snapshot (validated, immutable, versioned)
   ▲ watch.rs polls the file                         │
   │              prepare() loads certs/CAs (fallible, no side effects), then
@@ -78,9 +94,12 @@ admin (axum, own port): /live /ready (503 draining) /metrics /config /clusters
 health checkers (per endpoint, TLS-aware) ─▶ EndpointState ─▶ ClusterBalancer::refresh
 maintenance loop: outlier sweep 500 ms, cert re-read 1 s, idle pool sweep 15 s
 shutdown: drain.delay (accept, Connection: close) ▶ GOAWAY/close ▶ drain.timeout
+reload: plan listener slots (keep / rename / bind new / retire) ▶ prepare ▶ build ▶
+       swap ▶ retire old accept loops, start new ones (ADR 0036)
 ```
 
-- `ferry-config` (API frozen, ADR 0013; M2 added only optional fields):
+- `ferry-config` (API frozen, ADR 0013; M2 and M4 added only optional fields;
+  new fields must skip serialising their default, ADR 0033):
   `model.rs` and `policy.rs` (serde types, all `#[non_exhaustive]` with
   constructors), `duration.rs` (GEP-2257), `validate/{mod,routes,clusters,policy}.rs`
   (collects every error with a field path), `snapshot/{mod,matching,filter,
@@ -99,7 +118,8 @@ shutdown: drain.delay (accept, Connection: close) ▶ GOAWAY/close ▶ drain.tim
   (`Tracing`: server/client spans, W3C extract/inject, OTLP/gRPC batch export),
   `access_log.rs` (`AccessLog` writer thread, `Entry`), `lib.rs` (`Telemetry`
   bundle, `init_logging`).
-- `ferry-proxy`: `server.rs` (bind/`bind_with(Telemetry)`, accept, PROXY header,
+- `ferry-proxy`: `server.rs` (bind/`bind_with(Telemetry)`/`bind_awaiting`, listener
+  slots bound and retired on reload, accept, PROXY header,
   TLS handshake, drain stages, maintenance loop, `ReloadHandle`), `state.rs` (`Runtime`,
   `ListenerRuntime`, `ClusterRuntime`, `prepare`, `Control`, ADR 0014),
   `router.rs` (ADR 0009), `forward.rs` (filters, edge headers, retries, breakers,
@@ -108,19 +128,39 @@ shutdown: drain.delay (accept, Connection: close) ▶ GOAWAY/close ▶ drain.tim
   `ratelimit.rs` (GCRA slots, ADR 0022), `tls.rs` (server SNI resolver and
   rotation, client configs, ADR 0023/0024), `proxy_protocol.rs` (ADR 0017),
   `watch.rs` (ADR 0015), `observe.rs` (`Exchange`, `Observed` body),
-  `collector.rs` (scrape-time gauges), `admin.rs` (ADR 0030).
+  `collector.rs` (scrape-time gauges), `admin.rs` (ADR 0030), `remote.rs`
+  (follows the controller's snapshot stream, ADR 0033).
 - Metric handles live in the runtime (`ListenerRuntime.stats`/`route_stats`/
   `unmatched`, `ClusterRuntime.stats`); never look a metric up per request.
   New metrics: add to the stats struct and the `Families` collector, then to
   the dashboard; `tests/it/dashboard.rs` checks every queried name exists.
-- Local replies: 404 no route, 500 zero weights, 503 no healthy upstream,
+- Local replies: 404 no route, 500 zero weights or invalid backendRefs, 503 no healthy upstream,
   503 + `x-ferry-overloaded` (breaker), 429 + `retry-after` (rate limit),
   502 upstream failure, 504 timeout, 413/431/408/400 client errors; gRPC
   requests get trailers-only responses with the mapped `grpc-status`.
 - Each request calls `load_full()` once and keeps that `Arc<Runtime>`, so
   in-flight requests finish on their original snapshot.
-- `ferry-api`: `ferry.v1.SnapshotService` (bidirectional stream, ACK/NACK by
-  nonce). Codegen via protox (ADR 0003).
+- `ferry-api`: `ferry.v1.SnapshotService` (bidirectional stream, hello names the
+  Gateway, ACK/NACK by nonce). Codegen via protox (ADR 0003).
+- `ferry-controller` (ADR 0032-0035): `gateway_api/` (kopium-generated from the
+  v1.6.3 CRDs by `gen/gateway_api.py`; never edit by hand), `policy.rs`
+  (`FerryPolicy` CRD, `gateway.ferry.dev/v1alpha1`, rate-limit split),
+  `world.rs` (`World`, `ObjKey`, `Fleet`; `World::from_manifests` for tests),
+  `translate/{mod,route,backend,hostname,tests}.rs` (the pure translator:
+  listeners, attachment, backends, conditions), `status.rs` (status JSON,
+  write only on change), `provision.rs` (`ProxyTemplate`, fleet rendering),
+  `server.rs` (`Hub`, gRPC server), `leader.rs` (Lease), `certgen.rs`,
+  `run.rs` (reflectors, reconcile loop, writes, `/healthz` `/readyz`
+  `/debug/proxies` on 18001).
+- Gateway API semantics live in `translate`; test them there with YAML
+  fixtures (`translate/tests.rs`), not on a cluster. Container ports are
+  Gateway ports below 1024 plus 10000; 19001 is the proxy admin port.
+- `deploy/helm/ferry`: chart (CRDs, certgen hook, controller, RBAC,
+  GatewayClass, optional Gateway, PodMonitor); `values-kind.yaml` for kind.
+  The proxy template ConfigMap must match `ProxyTemplate` (unknown fields are
+  rejected).
+- `bench/exit/m4/`: runner image (kind, kubectl, helm, docker CLI, compiled
+  conformance suite), `e2e.sh` (phases setup, smoke, conformance), `smoke.yaml`.
 - `ferry-testkit`: mocks with `Behavior { latency, error_rate, error_status,
   tracing }` (`with_tracing` makes the HTTP mock record server spans);
   `trace-client` binary;
@@ -166,10 +206,25 @@ shutdown: drain.delay (accept, Connection: close) ▶ GOAWAY/close ▶ drain.tim
 | M0 Foundations | Approved 2026-10-13 |
 | M1 Core proxy | Approved 2026-10-13 |
 | M2 TLS and resilience | Approved 2026-10-13 |
-| **M3 Observability and admin** | Complete, awaiting gate approval |
-| M4 Kubernetes controller | Not started |
-| M5 Hardening | Not started |
+| M3 Observability and admin | Approved 2026-10-13 |
+| M4 Kubernetes controller | Approved 2026-10-13 |
+| **M5 Hardening** | In progress |
 | M6 Production beta | Not started |
+
+### Known gaps carried out of M4
+
+- Snapshot-stream certificates are read at start: after certgen renews them
+  (`helm upgrade` within 90 days of expiry), restart controller and proxies.
+  All proxies share one client identity (ADR 0033).
+- No Gateway listener isolation (`GatewayHTTPListenerIsolation`), ListenerSet,
+  BackendTLSPolicy, RequestMirror, CORS, GEP-1731 HTTPRoute retries (use
+  FerryPolicy `retry`), static Gateway addresses, `parametersRef` or
+  per-Gateway infrastructure overrides.
+- The controller has no Prometheus metrics yet (logs and `/debug/proxies`
+  only); proxies expose no "controller connected" gauge (M5 alert).
+- Conformance runs on kind with MetalLB; EKS with the AWS Load Balancer
+  Controller and PROXY v2 is untested until M6 staging.
+- Rate-limit splitting assumes an even spread of clients across replicas.
 
 ### Known gaps carried out of M3
 
@@ -196,8 +251,5 @@ shutdown: drain.delay (accept, Connection: close) ▶ GOAWAY/close ▶ drain.tim
 - WebSockets over HTTP/2 (RFC 8441) and upgrades to h2 clusters are unsupported
   (ADR 0025). Upgraded tunnels have no idle timeout.
 - `max_connections` fails fast instead of queueing (ADR 0020).
-- Rate limits are per replica; the controller's split arrives in M4.
-- Listener changes (add, remove, re-address) need a restart.
-- `ferry controller` exits with "not implemented (M4)".
 - GitHub Actions are pinned by major tag, not commit SHA; pin SHAs before the repo
   goes public (M5). Dependabot PRs for action bumps are open.

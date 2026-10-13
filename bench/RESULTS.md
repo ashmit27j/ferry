@@ -273,3 +273,85 @@ reproducibly across two runs today. It is still under 0.1 µs per connection
 
 Per request, telemetry costs about 22 ns with tracing and the access log off,
 about 0.7 µs more with the access log on, and about 0.8 µs more with tracing on.
+
+## M4 — 2026-10-13 (exit run on kind, dev workstation)
+
+### Exit criteria (`FRESH=1 bench/exit/run-m4.sh`)
+
+kind v1.37.0 (one node) with MetalLB for LoadBalancer addresses, in Docker
+Desktop. The run deleted any existing cluster, created a new one, loaded the
+`ferry:dev` image and ran `helm install` with `values-kind.yaml` (Gateway
+API v1.6.3 standard CRDs, two controller replicas).
+
+**`helm install` on a fresh kind cluster yields a working gateway**
+(`results/m4-run.log`, `m4-smoke.*`). The Helm-created Gateway was
+`Programmed=True` with a MetalLB address 5 s after the release came up. An
+HTTPRoute with a FerryPolicy served `GET /smoke/hello` through it to an echo
+pod, with `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Request-Id` set.
+Route and policy status were written back:
+
+```
+ferry: Accepted=True ResolvedRefs=True
+FerryPolicy Accepted=True (Accepted)
+```
+
+**The Gateway API conformance suite passes for HTTPRoute and GRPCRoute**
+(v1.6.3 suite, profiles GATEWAY-HTTP and GATEWAY-GRPC):
+
+| Run | Profile | Core | Extended | Sub-tests |
+| --- | --- | --- | --- | --- |
+| Core features (`m4-conformance-core.*`) | GATEWAY-HTTP | 36 passed, 0 failed | — | 215 passed, 0 failed |
+| | GATEWAY-GRPC | 14 passed, 0 failed | — | |
+| Extended features claimed (`m4-conformance-extended.*`) | GATEWAY-HTTP | 36 passed, 0 failed | **19 passed, 0 failed** | 331 passed, 0 failed |
+| | GATEWAY-GRPC | 14 passed, 0 failed | — | |
+
+The 16 extended features Ferry claims are listed in the extended report:
+GatewayPort8080, the 303/307/308 redirect codes, port, scheme and path
+redirects, host and path rewrites, query and method matching, response header
+modification, request and backend timeouts, parentRef port, and the H2C and
+WebSocket backend protocols. Not claimed: listener isolation, BackendTLSPolicy,
+CORS, request mirroring, static addresses, infrastructure overrides (see
+CLAUDE.md, "Known gaps carried out of M4").
+
+### Control-plane benchmarks (`cargo bench -p ferry-bench --bench controller`, Windows, i7-12700F)
+
+One Gateway; each HTTPRoute goes to its own Service with ten ready endpoints.
+Every change in the cluster runs one translation (after a 200 ms debounce);
+the snapshot JSON is what each proxy receives.
+
+| Benchmark | Mean |
+| --- | --- |
+| `controller/translate_100_routes` | 0.81 ms |
+| `controller/translate_1000_routes` | 8.49 ms |
+| `controller/snapshot_json_100_routes` | 124 µs |
+| `controller/snapshot_json_1000_routes` | 1.39 ms |
+
+Translation scales linearly at about 8.5 µs per route. At 1,000 routes a
+reconcile pass costs under 10 ms of CPU, well inside the debounce window.
+
+### Micro-benchmarks (`cargo bench -p ferry-bench`, Windows, i7-12700F)
+
+M4 did not touch the request path. The listener changes (ADR 0036) only run
+on reload.
+
+| Benchmark | M3 | M4 |
+| --- | --- | --- |
+| `lb/round_robin_pick_16` | 23.8 ns | 25.6 ns |
+| `lb/weighted_round_robin_pick_16` | 37.6 ns | 39.7 ns |
+| `lb/backend_split_pick` | 21.3 ns | 22.1 ns |
+| `lb/maglev_pick_16` | 16.9 ns | 18.5 ns |
+| `lb/retry_budget_deposit` | 36.0 ns | 37.8 ns |
+| `lb/breaker_acquire_release` | 15.9 ns | 16.6 ns |
+| `edge/proxy_protocol_v1_parse` | 82.9 ns | 91.3 ns |
+| `edge/proxy_protocol_v2_parse` | 8.4 ns | 8.7 ns |
+| `router/100_routes_prefix_hit` | 43.8 ns | 48.2 ns |
+| `router/1000_routes_prefix_hit` | 44.3 ns | 48.9 ns |
+| `telemetry/route_record` | 13.0 ns | 13.7 ns |
+| `telemetry/access_log_line` | 647 ns | 671 ns |
+| `telemetry/scrape_100_routes` | 312 µs | 332 µs |
+| `config/parse_validate_100_routes` | 2.46 ms | 2.64 ms |
+
+Everything is 3–10% slower. The benchmarks ran while the kind cluster and the
+conformance suite were up in Docker on the same machine, so this is read as
+load from the shared box, not a regression. The M1 exit test was not
+re-run for M4.
