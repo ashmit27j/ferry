@@ -38,6 +38,7 @@ mod tests {
             version: 3,
             nonce: "n-3".into(),
             error: String::new(),
+            gateway: "default/web".into(),
         };
         assert!(ack.error.is_empty());
     }

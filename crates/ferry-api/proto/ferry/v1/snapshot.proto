@@ -1,25 +1,34 @@
-// Control plane to data plane snapshot delivery.
+// Control plane to data plane snapshot delivery (ADR 0033).
 //
-// A proxy opens one long-lived StreamSnapshots call to the leader controller.
-// The controller pushes a SnapshotUpdate whenever the reconciled configuration
-// changes. The proxy answers every update with a SnapshotAck: accepted (ACK) once
-// the snapshot is swapped in, or rejected (NACK) with an error, in which case it
-// keeps serving its last good snapshot. Semantics follow Envoy's xDS ACK/NACK.
+// A proxy opens one long-lived StreamSnapshots call to a controller replica,
+// over mutual TLS. Its first message (the hello) names the Gateway it serves.
+// The controller answers with that Gateway's current snapshot, then pushes a
+// SnapshotUpdate whenever the reconciled configuration changes. The proxy
+// answers every update with a SnapshotAck: accepted (ACK) once the snapshot is
+// swapped in, or rejected (NACK) with an error, in which case it keeps serving
+// its last good snapshot. Semantics follow Envoy's xDS ACK/NACK.
+//
+// If the stream breaks, the proxy keeps serving and reconnects with backoff;
+// the controller sends the current snapshot again on the new stream.
 syntax = "proto3";
 
 package ferry.v1;
 
 service SnapshotService {
-  // Bidirectional: the proxy sends a hello ack (version 0) then one ack per update.
+  // Bidirectional: the proxy sends a hello ack (empty nonce) then one ack per update.
   rpc StreamSnapshots(stream SnapshotAck) returns (stream SnapshotUpdate);
 }
 
 message SnapshotUpdate {
-  // Monotonic snapshot version.
+  // Snapshot version: increases with every snapshot a controller replica
+  // builds (it starts from wall-clock milliseconds, so a new leader continues
+  // above its predecessor). Informational; acks are matched by nonce.
   uint64 version = 1;
   // Opaque token echoed in the matching ack, so acks for superseded updates are ignored.
   string nonce = 2;
-  // The snapshot, encoded as the ferry-config JSON form. A typed encoding may replace this in M4.
+  // The configuration in ferry-config's file format (`Config`), as JSON, with
+  // certificates inline and rate limits already divided by the number of
+  // ready proxy replicas. The proxy validates it like a config file.
   bytes snapshot_json = 3;
 }
 
@@ -32,4 +41,7 @@ message SnapshotAck {
   string nonce = 3;
   // Why the update was rejected. Empty means accepted.
   string error = 4;
+  // The Gateway this proxy serves, as "namespace/name". Required on the hello;
+  // ignored afterwards.
+  string gateway = 5;
 }

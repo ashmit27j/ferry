@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use ferry_config::{Listener, Snapshot, SnapshotVersion};
+use ferry_config::{Config, Listener, Snapshot, SnapshotVersion};
 use ferry_lb::pool::{PoolSet, PoolSettings};
 use http::header::{self, HeaderValue};
 use http::{Request, StatusCode, Version};
@@ -18,6 +18,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use hyper_util::server::graceful::GracefulShutdown;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -64,16 +65,136 @@ const EJECTION_SWEEP_INTERVAL: Duration = Duration::from_millis(500);
 /// How often idle upstream connections are swept.
 const POOL_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
 
+/// Pending-connection queue of each listening socket (tokio's default).
+const LISTEN_BACKLOG: i32 = 1024;
+
+/// Listener slots, parallel to [`Runtime::listeners`]. Index `i` of `bound`
+/// and of `stops` describe the same socket.
+#[derive(Debug, Default)]
+struct Slots {
+    bound: Vec<BoundListener>,
+    /// Cancels the accept loop of each slot.
+    stops: Vec<CancellationToken>,
+}
+
+/// A socket bound by a reload, waiting for [`Proxy::run`] to accept on it.
+#[derive(Debug)]
+struct NewListener {
+    index: usize,
+    addr: SocketAddr,
+    socket: std::net::TcpListener,
+    stop: CancellationToken,
+}
+
+/// How a snapshot's listeners map onto slots: what to keep, bind and retire.
+#[derive(Debug)]
+struct ListenerPlan {
+    /// Every slot after the change, retired ones included.
+    bound: Vec<BoundListener>,
+    /// Slots whose listener left the config.
+    retired: Vec<usize>,
+    /// Newly bound sockets, by slot index, in increasing order.
+    sockets: Vec<(usize, std::net::TcpListener)>,
+}
+
+/// Matches `snapshot`'s listeners against the current slots and binds a
+/// socket for each new one. A listener keeps its slot when its name and
+/// address are unchanged; a renamed listener on the same address takes over
+/// the old socket. Nothing is published: on error the new sockets are
+/// dropped and the running proxy is untouched.
+fn plan_listeners(
+    current: &[BoundListener],
+    snapshot: &Snapshot,
+) -> Result<ListenerPlan, ProxyError> {
+    let mut bound = current.to_vec();
+    let mut claimed = vec![false; bound.len()];
+    let mut unplaced = Vec::new();
+    for l in snapshot.listeners() {
+        let same_name = bound.iter().enumerate().position(|(i, b)| {
+            !b.retired && !claimed[i] && b.name == l.name() && b.configured == l.address()
+        });
+        if let Some(i) = same_name {
+            claimed[i] = true;
+        } else {
+            unplaced.push(l);
+        }
+    }
+    let mut fresh = Vec::new();
+    for l in unplaced {
+        // A renamed listener keeps the socket bound to its address, which a
+        // second bind could not take while the old one is open.
+        let same_address = bound.iter().enumerate().position(|(i, b)| {
+            !b.retired && !claimed[i] && b.configured == l.address() && l.address().port() != 0
+        });
+        match same_address {
+            Some(i) => {
+                claimed[i] = true;
+                if let Some(b) = bound.get_mut(i) {
+                    info!(from = %b.name, to = l.name(), address = %b.addr, "listener renamed");
+                    l.name().clone_into(&mut b.name);
+                }
+            }
+            None => fresh.push(l),
+        }
+    }
+    let mut retired = Vec::new();
+    for (i, b) in bound.iter_mut().enumerate() {
+        if !b.retired && !claimed[i] {
+            b.retired = true;
+            retired.push(i);
+        }
+    }
+    let mut sockets = Vec::with_capacity(fresh.len());
+    for l in fresh {
+        let bind_err = |source| ProxyError::Bind {
+            address: l.address(),
+            source,
+        };
+        let socket = bind_socket(l.address()).map_err(bind_err)?;
+        let addr = socket.local_addr().map_err(bind_err)?;
+        bound.push(BoundListener::new(l.name(), addr, l.address()));
+        sockets.push((bound.len() - 1, socket));
+    }
+    Ok(ListenerPlan {
+        bound,
+        retired,
+        sockets,
+    })
+}
+
+/// Binds a non-blocking listening socket. Synchronous, so a reload can fail
+/// before publishing anything; `SO_REUSEADDR` (on Unix) lets a removed and
+/// re-added listener rebind while old connections linger in `TIME_WAIT`.
+fn bind_socket(addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+    // On Windows SO_REUSEADDR lets another socket steal a bound port; skip it.
+    #[cfg(unix)]
+    socket.set_reuse_address(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(LISTEN_BACKLOG)?;
+    Ok(socket.into())
+}
+
 /// Shared between listeners, the reload handle and health checkers.
 #[derive(Debug)]
 pub(crate) struct Shared {
     runtime: ArcSwap<Runtime>,
     /// Set when shutdown starts: HTTP/1.1 responses then carry `Connection: close`.
     draining: AtomicBool,
+    /// Set until the first snapshot arrives for a proxy started with
+    /// [`Proxy::bind_awaiting`]; readiness fails meanwhile.
+    awaiting: AtomicBool,
+    /// Listener slots. Lock order: `slots`, then `control`.
+    slots: Mutex<Slots>,
     /// Serialises reloads with health-driven host-set rebuilds.
     control: Mutex<Control>,
+    /// Hands newly bound sockets to [`Proxy::run`].
+    new_listeners: mpsc::UnboundedSender<NewListener>,
+    /// Parent of every accept loop's stop token; cancelled at shutdown.
+    stop: CancellationToken,
     pools: PoolSet<UpstreamBody>,
-    bound: Vec<BoundListener>,
     telemetry: Arc<Telemetry>,
 }
 
@@ -92,23 +213,61 @@ impl Shared {
         self.control.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Builds and publishes a runtime for `snapshot` under the control lock.
+    fn slots(&self) -> std::sync::MutexGuard<'_, Slots> {
+        self.slots.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Builds and publishes a runtime for `snapshot`: binds new listeners,
+    /// loads certificates, then swaps. Any failure before the swap leaves
+    /// the running proxy untouched.
     fn install(self: &Arc<Self>, snapshot: Snapshot) -> Result<(), ProxyError> {
         let weak = Arc::downgrade(self);
+        let mut slots = self.slots();
+        let plan = plan_listeners(&slots.bound, &snapshot)?;
         let mut control = self.control();
         let prev = self.runtime.load_full();
-        let prepared = prepare(&snapshot, Some(&prev), &self.bound)?;
+        let prepared = prepare(&snapshot, Some(&prev), &plan.bound)?;
         let next = control.build(
             snapshot,
             Some(&prev),
-            &self.bound,
+            &plan.bound,
             &self.pools,
             &weak,
             &prepared,
             &self.telemetry.metrics,
         );
         self.runtime.store(Arc::new(next));
+        drop(control);
+        self.commit(&mut slots, plan);
         Ok(())
+    }
+
+    /// Applies a published plan: closes retired listeners and starts new ones.
+    fn commit(&self, slots: &mut Slots, plan: ListenerPlan) {
+        for i in plan.retired {
+            if let (Some(stop), Some(b)) = (slots.stops.get(i), plan.bound.get(i)) {
+                info!(listener = %b.name, address = %b.addr, "listener removed");
+                stop.cancel();
+            }
+        }
+        for (index, socket) in plan.sockets {
+            let Some(b) = plan.bound.get(index) else {
+                continue;
+            };
+            info!(listener = %b.name, address = %b.addr, "listening");
+            let stop = self.stop.child_token();
+            slots.stops.push(stop.clone());
+            let new = NewListener {
+                index,
+                addr: b.addr,
+                socket,
+                stop,
+            };
+            if self.new_listeners.send(new).is_err() {
+                warn!(listener = %b.name, "proxy stopped; not accepting on the new listener");
+            }
+        }
+        slots.bound = plan.bound;
     }
 
     /// Re-reads certificate files of TLS listeners and swaps in any that
@@ -156,7 +315,9 @@ impl HealthSink for Shared {
 #[derive(Debug)]
 pub struct Proxy {
     shared: Arc<Shared>,
-    listeners: Vec<(usize, SocketAddr, TcpListener)>,
+    /// Addresses bound at startup, in listener order.
+    initial: Vec<SocketAddr>,
+    new_listeners: mpsc::UnboundedReceiver<NewListener>,
 }
 
 /// A cheap, cloneable handle for swapping in new snapshots.
@@ -182,39 +343,44 @@ impl Proxy {
     ///
     /// # Errors
     ///
-    /// Returns [`ProxyError::Bind`] if any address cannot be bound.
+    /// Returns [`ProxyError::Bind`] if any address cannot be bound, or a TLS
+    /// error if a listener's certificates cannot be loaded.
     pub async fn bind_with(
         snapshot: Snapshot,
         telemetry: Arc<Telemetry>,
     ) -> Result<Self, ProxyError> {
-        let mut listeners = Vec::with_capacity(snapshot.listeners().len());
-        let mut bound = Vec::with_capacity(snapshot.listeners().len());
-        for (i, l) in snapshot.listeners().iter().enumerate() {
-            let tcp = TcpListener::bind(l.address())
-                .await
-                .map_err(|source| ProxyError::Bind {
-                    address: l.address(),
-                    source,
-                })?;
-            let local = tcp.local_addr().map_err(|source| ProxyError::Bind {
-                address: l.address(),
-                source,
-            })?;
-            info!(listener = l.name(), address = %local, "listening");
-            listeners.push((i, local, tcp));
-            bound.push(BoundListener {
-                name: l.name().to_owned(),
-                addr: local,
-            });
-        }
+        Self::start(snapshot, telemetry, false)
+    }
+
+    /// A proxy with no configuration yet, for the Kubernetes mode: it binds
+    /// nothing and reports not ready on the admin API until the first
+    /// [`ReloadHandle::swap`] succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Currently infallible; the `Result` matches [`Proxy::bind_with`].
+    pub async fn bind_awaiting(telemetry: Arc<Telemetry>) -> Result<Self, ProxyError> {
+        let empty = Config::new(Vec::new(), Vec::new())
+            .into_snapshot(SnapshotVersion(0))
+            .map_err(|e| ProxyError::Snapshot(e.to_string()))?;
+        Self::start(empty, telemetry, true)
+    }
+
+    fn start(
+        snapshot: Snapshot,
+        telemetry: Arc<Telemetry>,
+        awaiting: bool,
+    ) -> Result<Self, ProxyError> {
+        let plan = plan_listeners(&[], &snapshot)?;
         let pools = PoolSet::new(PoolSettings::default());
-        let prepared = prepare(&snapshot, None, &bound)?;
+        let prepared = prepare(&snapshot, None, &plan.bound)?;
+        let (tx, rx) = mpsc::unbounded_channel();
         let shared = Arc::new_cyclic(|weak: &Weak<Shared>| {
             let mut control = Control::default();
             let runtime = control.build(
                 snapshot,
                 None,
-                &bound,
+                &plan.bound,
                 &pools,
                 weak,
                 &prepared,
@@ -223,25 +389,38 @@ impl Proxy {
             Shared {
                 runtime: ArcSwap::from_pointee(runtime),
                 draining: AtomicBool::new(false),
+                awaiting: AtomicBool::new(awaiting),
+                slots: Mutex::new(Slots::default()),
                 control: Mutex::new(control),
+                new_listeners: tx,
+                stop: CancellationToken::new(),
                 pools,
-                bound,
                 telemetry: Arc::clone(&telemetry),
             }
         });
+        let initial = plan.bound.iter().map(|b| b.addr).collect();
+        shared.commit(&mut shared.slots(), plan);
         telemetry
             .metrics
             .register_collector(Box::new(StateCollector::new(Arc::downgrade(&shared))));
-        telemetry.metrics.proxy().mark_loaded();
+        if !awaiting {
+            telemetry.metrics.proxy().mark_loaded();
+        }
         // A checker could have flipped an endpoint before `shared` existed.
         shared.refresh_all();
-        Ok(Self { shared, listeners })
+        Ok(Self {
+            shared,
+            initial,
+            new_listeners: rx,
+        })
     }
 
-    /// Addresses actually bound, in listener order. Useful when a config asks for port 0.
+    /// Addresses bound at startup, in listener order. Useful when a config
+    /// asks for port 0. Listeners added later are found with
+    /// [`ReloadHandle::listener_addr`].
     #[must_use]
     pub fn local_addrs(&self) -> Vec<SocketAddr> {
-        self.listeners.iter().map(|(_, addr, _)| *addr).collect()
+        self.initial.clone()
     }
 
     /// A handle that swaps the active snapshot while the proxy runs.
@@ -253,6 +432,9 @@ impl Proxy {
     }
 
     /// Serves until `shutdown` resolves, then drains in two stages (ADR 0026).
+    ///
+    /// Listeners added by later reloads start accepting as they are bound,
+    /// and removed ones stop, draining their connections like a shutdown.
     ///
     /// 1. For `drain.delay`, keep accepting while load balancers deregister
     ///    this instance, but end every HTTP/1.1 response with
@@ -268,25 +450,42 @@ impl Proxy {
     /// Currently infallible after binding; the `Result` reserves room for
     /// listener failures that should stop the process.
     pub async fn run(
-        self,
+        mut self,
         shutdown: impl Future<Output = ()> + Send,
         drain: Drain,
     ) -> Result<(), ProxyError> {
         let drain_timeout = drain.timeout;
-        let token = CancellationToken::new();
+        let token = self.shared.stop.clone();
         let mut tasks = JoinSet::new();
-        for (index, addr, tcp) in self.listeners {
-            tasks.spawn(accept_loop(
-                Arc::clone(&self.shared),
-                index,
-                addr,
-                tcp,
-                token.clone(),
-                drain_timeout,
-            ));
-        }
         let sweeper = tokio::spawn(maintenance(Arc::downgrade(&self.shared), token.clone()));
-        shutdown.await;
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                () = &mut shutdown => break,
+                Some(new) = self.new_listeners.recv() => {
+                    let index = new.index;
+                    let addr = new.addr;
+                    match TcpListener::from_std(new.socket) {
+                        Ok(tcp) => {
+                            tasks.spawn(accept_loop(
+                                Arc::clone(&self.shared),
+                                index,
+                                addr,
+                                tcp,
+                                new.stop,
+                                drain_timeout,
+                            ));
+                        }
+                        Err(e) => warn!(listener = %addr, error = %e, "cannot accept on listener"),
+                    }
+                }
+                Some(res) = tasks.join_next(), if !tasks.is_empty() => {
+                    if let Err(e) = res {
+                        warn!(error = %e, "listener task ended abnormally");
+                    }
+                }
+            }
+        }
         self.shared.draining.store(true, Ordering::Relaxed);
         if !drain.delay.is_zero() {
             info!(delay = ?drain.delay, "shutdown requested; closing client connections as they finish");
@@ -312,18 +511,21 @@ impl Proxy {
 impl ReloadHandle {
     /// Atomically replaces the active snapshot. Requests already in flight keep
     /// the snapshot they started with. Unchanged clusters and routers, endpoint
-    /// health and connection pools carry over. Listener addresses are not
-    /// rebound; a changed listener set takes effect on restart.
+    /// health and connection pools carry over. New listeners are bound and
+    /// start accepting; removed ones stop accepting and drain.
     ///
     /// # Errors
     ///
-    /// Fails, leaving the current snapshot serving, if a TLS listener's
-    /// certificates cannot be loaded.
+    /// Fails, leaving the current snapshot serving, if a new listener cannot
+    /// be bound or a TLS listener's certificates cannot be loaded.
     pub fn swap(&self, snapshot: Snapshot) -> Result<(), ProxyError> {
         let version = snapshot.version();
         let result = self.shared.install(snapshot);
         self.shared.telemetry.metrics.proxy().reload(result.is_ok());
         result?;
+        if self.shared.awaiting.swap(false, Ordering::Relaxed) {
+            self.shared.telemetry.metrics.proxy().mark_loaded();
+        }
         info!(%version, "snapshot swapped");
         Ok(())
     }
@@ -354,6 +556,24 @@ impl ReloadHandle {
     #[must_use]
     pub fn is_draining(&self) -> bool {
         self.shared.draining.load(Ordering::Relaxed)
+    }
+
+    /// Whether the proxy still waits for its first snapshot (see
+    /// [`Proxy::bind_awaiting`]).
+    #[must_use]
+    pub fn is_awaiting_config(&self) -> bool {
+        self.shared.awaiting.load(Ordering::Relaxed)
+    }
+
+    /// The address listener `name` is bound to, if it is live.
+    #[must_use]
+    pub fn listener_addr(&self, name: &str) -> Option<SocketAddr> {
+        self.shared
+            .slots()
+            .bound
+            .iter()
+            .find(|b| !b.retired && b.name == name)
+            .map(|b| b.addr)
     }
 
     /// Version of the snapshot currently serving new requests.
@@ -472,6 +692,8 @@ async fn accept_loop(
                     let stats = Arc::clone(&listener.stats);
                     let proxy_protocol = listener.config.proxy_protocol();
                     let tls = listener.tls.as_ref().map(|t| Arc::clone(&t.config));
+                    // Redirects keep the port clients used, not the bound one.
+                    let port = listener.config.advertised_port().unwrap_or(addr.port());
                     let builder = match &cached {
                         Some((l, b)) if Arc::ptr_eq(l, &listener) => b,
                         _ => {
@@ -481,7 +703,7 @@ async fn accept_loop(
                     };
                     let from = Downstream {
                         listener: index,
-                        port: addr.port(),
+                        port,
                         peer,
                         scheme,
                     };

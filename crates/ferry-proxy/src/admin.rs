@@ -4,13 +4,13 @@
 //! bound to its own address (localhost by default; the pod IP in
 //! Kubernetes). It never shares a port with proxied traffic.
 //!
-//! | Path        | What                                                        |
-//! | ----------- | ----------------------------------------------------------- |
-//! | `/live`     | 200 while the process runs (liveness probe)                 |
-//! | `/ready`    | 200 while serving, 503 once draining (readiness probe)      |
-//! | `/metrics`  | Prometheus metrics, OpenMetrics text                        |
-//! | `/config`   | The active snapshot as JSON, secrets redacted               |
-//! | `/clusters` | Live endpoint state: health, ejection, load, pools, budgets |
+//! | Path        | What                                                          |
+//! | ----------- | ------------------------------------------------------------- |
+//! | `/live`     | 200 while the process runs (liveness probe)                   |
+//! | `/ready`    | 200 while serving; 503 before the first snapshot or draining  |
+//! | `/metrics`  | Prometheus metrics, OpenMetrics text                          |
+//! | `/config`   | The active snapshot as JSON, secrets redacted                 |
+//! | `/clusters` | Live endpoint state: health, ejection, load, pools, budgets   |
 //!
 //! There are no endpoints that change state, so exposing the port to the
 //! cluster network reveals topology but cannot alter routing.
@@ -65,6 +65,12 @@ async fn live() -> &'static str {
 async fn ready(State(h): State<ReloadHandle>) -> Response {
     if h.is_draining() {
         (StatusCode::SERVICE_UNAVAILABLE, "draining\n").into_response()
+    } else if h.is_awaiting_config() {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "waiting for configuration\n",
+        )
+            .into_response()
     } else {
         (StatusCode::OK, "ready\n").into_response()
     }

@@ -139,7 +139,11 @@ fn prepare_tls(
         .iter()
         .enumerate()
         .map(|(i, b)| {
-            let Some(tls) = snapshot.listener(&b.name).and_then(|l| l.tls()) else {
+            let Some(tls) = snapshot
+                .listener(&b.name)
+                .filter(|_| !b.retired)
+                .and_then(|l| l.tls())
+            else {
                 return Ok(None);
             };
             let reused = prev
@@ -180,11 +184,32 @@ impl Runtime {
     }
 }
 
-/// A listener as bound at startup. Addresses are not rebound on reload.
+/// A bound listener socket: one slot of [`Runtime::listeners`].
+///
+/// Slots are appended when a reload adds a listener and retired (never
+/// reused) when one is removed, so a connection accepted on a removed
+/// listener can never resolve to a newer one.
 #[derive(Debug, Clone)]
 pub(crate) struct BoundListener {
     pub(crate) name: String,
+    /// The address actually bound (the real port when `configured` asks for 0).
     pub(crate) addr: SocketAddr,
+    /// The address the config asked for.
+    pub(crate) configured: SocketAddr,
+    /// The listener left the config; its socket is closed.
+    pub(crate) retired: bool,
+}
+
+impl BoundListener {
+    /// A live slot for `name`, bound at `addr` for config address `configured`.
+    pub(crate) fn new(name: impl Into<String>, addr: SocketAddr, configured: SocketAddr) -> Self {
+        Self {
+            name: name.into(),
+            addr,
+            configured,
+            retired: false,
+        }
+    }
 }
 
 /// Cross-reload state. Only touched on the control path, under a mutex.
@@ -257,14 +282,13 @@ impl Control {
             .iter()
             .enumerate()
             .map(|(i, b)| {
+                if b.retired {
+                    return None;
+                }
                 let Some(listener) = snapshot.listener(&b.name) else {
-                    warn!(listener = %b.name, "listener removed from config; it now answers 503 until restart");
+                    warn!(listener = %b.name, "bound listener missing from the snapshot");
                     return None;
                 };
-                if listener.address() != b.addr && listener.address().port() != 0 {
-                    warn!(listener = %b.name, bound = %b.addr, configured = %listener.address(),
-                        "listener address changed; the new address takes effect on restart");
-                }
                 let old = prev.and_then(|p| p.listeners.get(i).cloned().flatten());
                 let tls = tls.get(i).cloned().flatten();
                 if let Some(old) = old.as_ref().filter(|o| {
@@ -282,7 +306,10 @@ impl Control {
                 let router = old
                     .as_ref()
                     .filter(|o| o.config.routes() == listener.routes())
-                    .map_or_else(|| Arc::new(Router::new(listener)), |o| Arc::clone(&o.router));
+                    .map_or_else(
+                        || Arc::new(Router::new(listener)),
+                        |o| Arc::clone(&o.router),
+                    );
                 // Keep a route's buckets when its limit is unchanged.
                 let rate_limiters = listener
                     .routes()
@@ -319,15 +346,6 @@ impl Control {
                 }))
             })
             .collect();
-
-        for name in snapshot.listeners().iter().map(|l| l.name()) {
-            if !bound.iter().any(|b| b.name == name) {
-                warn!(
-                    listener = name,
-                    "new listener in config; it is bound on restart"
-                );
-            }
-        }
 
         self.endpoints.retain(|k, _| used_endpoints.contains(k));
         pools.retain(&used_pools);
@@ -625,10 +643,8 @@ clusters:
 ";
 
     fn bound() -> Vec<BoundListener> {
-        vec![BoundListener {
-            name: "l".into(),
-            addr: "127.0.0.1:1".parse().unwrap(),
-        }]
+        let addr = "127.0.0.1:1".parse().unwrap();
+        vec![BoundListener::new("l", addr, addr)]
     }
 
     #[tokio::test]
@@ -784,10 +800,11 @@ clusters:
         let sink: Weak<NoSink> = Weak::new();
         let mut control = Control::default();
         let mut b = bound();
-        b.push(BoundListener {
-            name: "gone".into(),
-            addr: "127.0.0.1:2".parse().unwrap(),
-        });
+        let addr = "127.0.0.1:2".parse().unwrap();
+        b.push(BoundListener::new("gone", addr, addr));
+        let mut retired = BoundListener::new("l", addr, addr);
+        retired.retired = true;
+        b.push(retired);
         let rt = control.build(
             snap(BASE),
             None,
@@ -799,6 +816,7 @@ clusters:
         );
         assert!(rt.listeners[0].is_some());
         assert!(rt.listeners[1].is_none());
+        assert!(rt.listeners[2].is_none(), "a retired slot stays empty");
     }
 
     #[test]

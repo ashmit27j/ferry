@@ -21,6 +21,7 @@ mod grpc;
 mod observe;
 pub mod proxy_protocol;
 mod ratelimit;
+pub mod remote;
 pub mod router;
 mod server;
 mod state;

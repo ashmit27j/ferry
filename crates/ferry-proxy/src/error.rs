@@ -23,6 +23,9 @@ pub enum ProxyError {
         #[source]
         source: crate::tls::TlsError,
     },
+    /// A snapshot could not be built.
+    #[error("invalid snapshot: {0}")]
+    Snapshot(String),
     /// A listener's certificates could not be loaded.
     #[error("listener {listener}: {source}")]
     Tls {
