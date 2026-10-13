@@ -30,7 +30,10 @@ docker run --rm \
     trap save EXIT
     command -v cargo-fuzz >/dev/null || cargo install --locked --root /opt/cargo-bin cargo-fuzz
     out=/ferry/bench/exit/results/m5-fuzz.txt
-    echo "cargo-fuzz, $SECONDS_EACH s per target, $(rustc --version)" > "$out"
+    # One line per target, replaced when a target is fuzzed again.
+    touch "$out"
+    sed -i "/^cargo-fuzz,/d" "$out"
+    sed -i "1i cargo-fuzz, $SECONDS_EACH s per target, $(rustc --version)" "$out"
     status=0
     for t in $TARGETS; do
       mkdir -p corpus/$t
@@ -44,6 +47,7 @@ docker run --rm \
       runs=$(sed -n "s/^stat::number_of_executed_units: *//p" /tmp/$t.log | tail -1 || true)
       cov=$(grep -o "cov: [0-9]*" /tmp/$t.log | tail -1 || true)
       corpus=$(ls corpus/$t | wc -l)
+      sed -i "/^$t /d" "$out"
       printf "%-18s %-6s %12s execs  %-10s corpus %s\n" "$t" "$result" "${runs:-?}" "${cov:-cov: ?}" "$corpus" | tee -a "$out"
       [ "$result" = ok ] || tail -40 /tmp/$t.log
     done

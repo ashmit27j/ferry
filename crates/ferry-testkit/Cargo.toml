@@ -16,6 +16,10 @@ path = "src/bin/mock-backend.rs"
 name = "trace-client"
 path = "src/bin/trace-client.rs"
 
+[[bin]]
+name = "ws-flood"
+path = "src/bin/ws-flood.rs"
+
 [dependencies]
 anyhow.workspace = true
 ferry-telemetry.workspace = true

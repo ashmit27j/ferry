@@ -1,0 +1,48 @@
+# Config for the M5 soak (bench/exit/run-m5.sh). Every backend runs in its
+# own container (static IPs on 172.30.5.0/24), so chaos (kills, tc netem
+# latency and loss) hits one backend at a time. The reloader rewrites
+# RELOAD_MARK every minute, so a 4-hour soak also covers some 240 reloads.
+listeners:
+  - name: http
+    address: 0.0.0.0:8080
+    timeouts: { tunnel_idle: 5m }
+    routes:
+      - name: ws
+        rules:
+          - matches: [{ path: { type: PathPrefix, value: /ws } }]
+            backends: [{ cluster: ws }]
+      - name: bench
+        rules:
+          - filters:
+              - type: ResponseHeaderModifier
+                set: [{ name: x-config-mark, value: "RELOAD_MARK" }]
+            timeouts: { request: 5s, backend_request: 1s }
+            retry: { attempts: 3, codes: [502, 503, 504], backoff: 10ms }
+            backends: [{ cluster: app }]
+
+clusters:
+  - name: app
+    lb_policy: p2c_ewma
+    connect_timeout: 1s
+    health_check:
+      interval: 1s
+      timeout: 500ms
+      unhealthy_threshold: 2
+      healthy_threshold: 2
+      http: { path: /healthz }
+    outlier_detection:
+      consecutive_5xx: 5
+      consecutive_gateway_failure: 3
+      base_ejection_time: 10s
+      max_ejection_percent: 34
+    endpoints:
+      - address: 172.30.5.11:9000
+      - address: 172.30.5.12:9000
+      - address: 172.30.5.13:9000
+  # Every open WebSocket holds a connection and a request slot (ADR 0025),
+  # so a cluster of long-lived tunnels needs breakers above its peak count
+  # (the default is 1024, as in Envoy).
+  - name: ws
+    circuit_breakers: { max_connections: 20000, max_requests: 20000, max_pending_requests: 20000 }
+    endpoints:
+      - address: 172.30.5.14:9000

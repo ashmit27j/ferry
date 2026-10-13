@@ -1,0 +1,11 @@
+# Scrapes Ferry's admin API for the M5 soak (bench/exit/run-m5.sh).
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: ferry
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["172.30.5.10:9901"]
+        labels: { fleet: m5 }

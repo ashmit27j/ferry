@@ -1,0 +1,7 @@
+cargo-fuzz, 600 s per target, rustc 1.101.0-nightly (e9bbadf68 2026-10-12)
+config_yaml        ok          2041741 execs  cov: 18965 corpus 7457
+proxy_protocol     ok        392878403 execs  cov: 159   corpus 122
+snapshot_json      ok         17971030 execs  cov: 12239 corpus 9077
+router             ok         23854201 execs  cov: 2076  corpus 8937
+gateway_manifests  ok           874476 execs  cov: 18219 corpus 5234
+header_values      ok        386778230 execs  cov: 136   corpus 116
