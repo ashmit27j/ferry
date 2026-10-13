@@ -78,18 +78,24 @@ risks we accept. In short:
 
 ## Verifying a release
 
-Release images are signed with Cosign keyless signing (Sigstore) from the
-release workflow, and each carries an SPDX SBOM attestation:
+Release images (linux/amd64 and linux/arm64) and the Helm chart (an OCI
+artifact under `ghcr.io/ashmit27j/charts/ferry`) are signed with Cosign
+keyless signing (Sigstore) by the release workflow, which runs on `main`
+after a release PR merges. Each image also carries an SPDX SBOM attestation
+and SLSA build provenance:
 
 ```sh
-IMAGE=ghcr.io/ashmit27j/ferry:v1.0.0
+IMAGE=ghcr.io/ashmit27j/ferry:1.0.0
 cosign verify "$IMAGE" \
-  --certificate-identity-regexp '^https://github.com/ashmit27j/ferry/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-identity https://github.com/ashmit27j/ferry/.github/workflows/release.yml@refs/heads/main \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 cosign verify-attestation "$IMAGE" --type spdxjson \
-  --certificate-identity-regexp '^https://github.com/ashmit27j/ferry/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-identity https://github.com/ashmit27j/ferry/.github/workflows/release.yml@refs/heads/main \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-Kubernetes clusters can enforce this at admission, for example with the
+The SBOM is also attached to each GitHub release. Provenance can be checked
+with `gh attestation verify oci://$IMAGE --owner ashmit27j`.
+
+Kubernetes clusters can enforce signatures at admission, for example with the
 Sigstore policy-controller or Kyverno's `verifyImages`.
