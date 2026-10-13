@@ -63,6 +63,12 @@ impl EndpointState {
         self.outlier.is_ejected()
     }
 
+    /// Times passive outlier detection has ejected this endpoint.
+    #[must_use]
+    pub fn ejections_total(&self) -> u64 {
+        self.outlier.total()
+    }
+
     /// Records a health verdict; returns true if it changed.
     pub fn set_healthy(&self, healthy: bool) -> bool {
         self.healthy.swap(healthy, Ordering::Relaxed) != healthy

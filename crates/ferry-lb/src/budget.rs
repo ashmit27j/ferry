@@ -60,6 +60,12 @@ impl RetryBudget {
         self.try_withdraw_at(now_ns())
     }
 
+    /// Retries the budget would allow right now.
+    #[must_use]
+    pub fn remaining(&self) -> u64 {
+        self.remaining_at(now_ns())
+    }
+
     fn epoch(&self, now: u64) -> u64 {
         // +1 so that epoch 0 never collides with a fresh bucket's default.
         now / self.bucket_ns + 1
@@ -86,8 +92,8 @@ impl RetryBudget {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    fn try_withdraw_at(&self, now: u64) -> bool {
-        let current = self.epoch(now);
+    /// Deposits and withdrawals in the window ending at epoch `current`.
+    fn window(&self, current: u64) -> (u64, u64) {
         let (mut deposits, mut withdrawals) = (0u64, 0u64);
         for b in &self.buckets {
             let e = b.epoch.load(Ordering::Relaxed);
@@ -96,6 +102,17 @@ impl RetryBudget {
                 withdrawals += b.withdrawals.load(Ordering::Relaxed);
             }
         }
+        (deposits, withdrawals)
+    }
+
+    fn remaining_at(&self, now: u64) -> u64 {
+        let (deposits, withdrawals) = self.window(self.epoch(now));
+        (self.floor + deposits * self.percent / 100).saturating_sub(withdrawals)
+    }
+
+    fn try_withdraw_at(&self, now: u64) -> bool {
+        let current = self.epoch(now);
+        let (deposits, withdrawals) = self.window(current);
         let allowed = self.floor + deposits * self.percent / 100;
         if withdrawals >= allowed {
             return false;
@@ -119,6 +136,18 @@ mod tests {
     use proptest::prelude::*;
 
     const SEC: u64 = 1_000_000_000;
+
+    #[test]
+    fn remaining_tracks_withdrawals() {
+        let b = RetryBudget::new(20, 1, Duration::from_secs(10));
+        assert_eq!(b.remaining_at(SEC), 10);
+        for _ in 0..50 {
+            b.deposit_at(SEC);
+        }
+        assert_eq!(b.remaining_at(SEC), 20);
+        assert!(b.try_withdraw_at(SEC));
+        assert_eq!(b.remaining_at(SEC), 19);
+    }
 
     #[test]
     fn floor_allows_retries_without_traffic() {

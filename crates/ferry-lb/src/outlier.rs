@@ -62,6 +62,8 @@ pub(crate) struct OutlierState {
     /// last decayed (or the ejection ended).
     until_ns: AtomicU64,
     ejections: AtomicU32,
+    /// Ejections ever, for metrics.
+    total: AtomicU64,
 }
 
 impl OutlierState {
@@ -97,6 +99,7 @@ impl OutlierState {
         if self.ejected.swap(true, Ordering::Relaxed) {
             return false;
         }
+        self.total.fetch_add(1, Ordering::Relaxed);
         let n = self.ejections.fetch_add(1, Ordering::Relaxed) + 1;
         let length = cfg
             .base_ejection_time
@@ -127,6 +130,10 @@ impl OutlierState {
             self.until_ns.store(now_ns, Ordering::Relaxed);
         }
         false
+    }
+
+    pub(crate) fn total(&self) -> u64 {
+        self.total.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -206,5 +213,6 @@ mod tests {
         assert_eq!(s.ejections(), 2);
         s.sweep(76 * S, &c);
         assert_eq!(s.ejections(), 1);
+        assert_eq!(s.total(), 3, "the lifetime total never decays");
     }
 }
