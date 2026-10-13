@@ -1,4 +1,5 @@
-//! Micro-benchmarks for per-request work: balancer picks, routing and config load.
+//! Micro-benchmarks for per-request work: balancer picks, routing, telemetry
+//! and config load.
 //!
 //! Run with `cargo bench -p ferry-bench`. Record results in `bench/RESULTS.md`.
 
@@ -125,5 +126,88 @@ fn config(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, balancers, resilience, routing, config);
+/// A span exporter that discards everything, so span benches measure Ferry's
+/// side only (creation, attributes, propagation, queueing).
+#[derive(Debug)]
+struct Discard;
+
+impl opentelemetry_sdk::trace::SpanExporter for Discard {
+    async fn export(
+        &self,
+        _batch: Vec<opentelemetry_sdk::trace::SpanData>,
+    ) -> opentelemetry_sdk::error::OTelSdkResult {
+        Ok(())
+    }
+}
+
+fn telemetry(c: &mut Criterion) {
+    use ferry_telemetry::Metrics;
+    use ferry_telemetry::access_log::{Entry, rfc3339_millis};
+    use ferry_telemetry::trace::Tracing;
+
+    let metrics = Metrics::new();
+    let route = metrics.route("http", "api");
+    let listener = metrics.listener("http");
+    c.bench_function("telemetry/histogram_observe", |b| {
+        b.iter(|| {
+            listener
+                .overhead
+                .observe(black_box(Duration::from_micros(42)))
+        })
+    });
+    c.bench_function("telemetry/route_record", |b| {
+        b.iter(|| route.record(black_box(200), black_box(Duration::from_micros(420))))
+    });
+    c.bench_function("telemetry/access_log_line", |b| {
+        let now = std::time::SystemTime::now();
+        b.iter(|| {
+            let entry = Entry {
+                start_time: rfc3339_millis(now),
+                duration_ms: 0.412,
+                upstream_service_time_ms: Some(0.301),
+                listener: "http",
+                route: "api",
+                upstream_cluster: Some("app"),
+                upstream_host: Some("10.0.1.17:8080".into()),
+                attempts: 1,
+                method: "GET",
+                authority: "api.example.com",
+                path: "/v1/orders/42?expand=items",
+                protocol: "HTTP/1.1",
+                response_code: 200,
+                response_flags: "-".into(),
+                bytes_sent: 1834,
+                downstream_remote_address: "203.0.113.9:51234".into(),
+                user_agent: Some("k6/1.3.0"),
+                request_id: "4bf92f35-77b3-4da6-a3ce-929d0e0e4736",
+                ..Entry::default()
+            };
+            black_box(serde_json::to_string(&entry).unwrap())
+        })
+    });
+    for (name, ratio) in [("unsampled", 0.0), ("sampled", 1.0)] {
+        let tracing = Tracing::with_exporter(Discard, "bench", ratio);
+        let incoming = HeaderMap::new();
+        c.bench_function(&format!("telemetry/spans_{name}"), |b| {
+            b.iter(|| {
+                let server = tracing.server_span(&incoming, "GET", std::time::SystemTime::now());
+                let client = tracing.client_span(&server, "GET");
+                let mut out = HeaderMap::new();
+                tracing.inject(&client, &mut out);
+                client.end_status(200);
+                server.end(200, None);
+                black_box(out)
+            })
+        });
+    }
+    for i in 0..100 {
+        let r = metrics.route("http", &format!("route-{i}"));
+        r.record(200, Duration::from_millis(1));
+    }
+    c.bench_function("telemetry/scrape_100_routes", |b| {
+        b.iter(|| black_box(metrics.encode().unwrap().len()))
+    });
+}
+
+criterion_group!(benches, balancers, resilience, routing, telemetry, config);
 criterion_main!(benches);

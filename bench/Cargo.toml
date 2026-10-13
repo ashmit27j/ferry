@@ -23,7 +23,10 @@ ferry-config.workspace = true
 criterion.workspace = true
 ferry-lb.workspace = true
 ferry-proxy.workspace = true
+ferry-telemetry.workspace = true
 http.workspace = true
+opentelemetry_sdk.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
