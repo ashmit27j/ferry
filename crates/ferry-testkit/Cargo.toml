@@ -12,8 +12,13 @@ publish.workspace = true
 name = "mock-backend"
 path = "src/bin/mock-backend.rs"
 
+[[bin]]
+name = "trace-client"
+path = "src/bin/trace-client.rs"
+
 [dependencies]
 anyhow.workspace = true
+ferry-telemetry.workspace = true
 bytes.workspace = true
 clap.workspace = true
 fastrand.workspace = true
@@ -21,7 +26,7 @@ futures-util = { workspace = true, features = ["sink", "std"] }
 http.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["http1", "http2", "server"] }
-hyper-util = { workspace = true, features = ["tokio", "server-auto", "service"] }
+hyper-util = { workspace = true, features = ["tokio", "server-auto", "service", "client-legacy", "http1"] }
 prost.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true

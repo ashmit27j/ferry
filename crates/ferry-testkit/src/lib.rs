@@ -43,6 +43,9 @@ pub struct Behavior {
     pub error_rate: f64,
     /// HTTP status used for injected HTTP errors.
     pub error_status: u16,
+    /// When set, the HTTP mock records a server span per request,
+    /// continuing the caller's `traceparent`, as an instrumented service would.
+    pub tracing: Option<Arc<ferry_telemetry::Tracing>>,
 }
 
 impl Behavior {
@@ -54,7 +57,15 @@ impl Behavior {
             latency: Duration::ZERO,
             error_rate: 0.0,
             error_status: 503,
+            tracing: None,
         }
+    }
+
+    /// Records a server span for every HTTP request.
+    #[must_use]
+    pub fn with_tracing(mut self, tracing: Arc<ferry_telemetry::Tracing>) -> Self {
+        self.tracing = Some(tracing);
+        self
     }
 
     /// Sets the injected latency.

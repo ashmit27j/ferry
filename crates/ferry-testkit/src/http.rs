@@ -165,6 +165,15 @@ async fn respond(
         }
         return Ok(resp);
     }
+    let span = behavior.tracing.as_ref().map(|t| {
+        let span = t.server_span(
+            req.headers(),
+            req.method().as_str(),
+            std::time::SystemTime::now(),
+        );
+        span.rename(format!("{} {}", req.method(), req.uri().path()));
+        span
+    });
     let latency = header_u64(&req, LATENCY_HEADER).map_or(behavior.latency, Duration::from_millis);
     let body_delay = header_u64(&req, BODY_DELAY_HEADER).map(Duration::from_millis);
     let forced = header_u64(&req, STATUS_HEADER)
@@ -222,6 +231,9 @@ async fn respond(
     );
     if let Ok(name) = HeaderValue::from_str(&behavior.name) {
         resp.headers_mut().insert(BACKEND_HEADER, name);
+    }
+    if let Some(span) = span {
+        span.end(status.as_u16(), None);
     }
     Ok(resp)
 }
