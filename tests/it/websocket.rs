@@ -139,3 +139,38 @@ async fn silent_tunnels_close_after_tunnel_idle() {
         "{ended:?}"
     );
 }
+
+#[tokio::test]
+async fn open_tunnels_count_towards_max_connections() {
+    let ws = mock_ws::spawn(any_port(), Behavior::named("ws"))
+        .await
+        .unwrap();
+    let proxy = TestProxy::start(&yaml_with(
+        ws.addr(),
+        "http1",
+        "    limits: { max_connections: 2 }",
+    ))
+    .await;
+    let url = format!("ws://{}/", proxy.addr);
+    let (mut a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    // Both upgraded connections still count, after hyper has let go of them.
+    ferry_integration_tests::eventually(std::time::Duration::from_secs(5), || {
+        ferry_integration_tests::metric(
+            &proxy.metrics_text(),
+            r#"ferry_downstream_active_connections{listener="http"}"#,
+        ) == Some(2.0)
+    })
+    .await;
+    assert!(
+        tokio_tungstenite::connect_async(&url).await.is_err(),
+        "a third connection is over the cap"
+    );
+    for s in [&mut a, &mut b] {
+        s.send(Message::text("still here")).await.unwrap();
+        assert_eq!(
+            s.next().await.unwrap().unwrap(),
+            Message::text("still here")
+        );
+    }
+}

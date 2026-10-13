@@ -33,7 +33,7 @@ use crate::state::{ClusterRuntime, Runtime, hash_key, set_cookie};
 use ferry_lb::pool::PoolError;
 use ferry_lb::{Outcome, Permit, RequestGuard};
 use ferry_telemetry::Telemetry;
-use ferry_telemetry::metrics::{Breaker, Reason};
+use ferry_telemetry::metrics::{Breaker, ConnectionGuard, ListenerStats, Reason};
 use ferry_telemetry::trace::{Attribute, ServerSpan, Tracing};
 use hyper::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
@@ -298,6 +298,7 @@ async fn proxy(
         per_try: timeouts.backend_request(),
         idle: timeouts.idle(),
         tunnel_idle: listener.config.timeouts().tunnel_idle(),
+        listener_stats: &listener.stats,
         policy,
         trace: tracing.zip(ex.span.as_ref()),
     };
@@ -590,6 +591,9 @@ struct Attempts<'a> {
     idle: Duration,
     /// Silence after which an upgraded connection is closed (ADR 0037).
     tunnel_idle: Duration,
+    /// Counts upgraded connections as open while their tunnel lives, so the
+    /// listener's connection cap covers them (ADR 0037).
+    listener_stats: &'a Arc<ListenerStats>,
     policy: Option<&'a RetryPolicy>,
     /// The tracer and the request's server span, when tracing is on.
     trace: Option<(&'a Tracing, &'a ServerSpan)>,
@@ -762,11 +766,11 @@ impl Attempts<'_> {
                                 .headers
                                 .insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
                         }
+                        let held = self.listener_stats.hold_upgraded();
                         tokio::spawn(tunnel(
                             downstream,
                             upstream,
-                            guard,
-                            request_slot,
+                            (guard, request_slot, held),
                             self.tunnel_idle,
                         ));
                         return Ok(Response::from_parts(parts, empty_body()));
@@ -861,12 +865,12 @@ fn upgrade_protocol(headers: &HeaderMap) -> Option<HeaderValue> {
 /// Copies bytes both ways between an upgraded client and backend until both
 /// close or the tunnel goes quiet for `idle`. The endpoint's in-flight guard
 /// and request slot live as long as the tunnel, so balancing and circuit
-/// breakers see it as one long request.
+/// breakers see it as one long request; the connection guard keeps it in
+/// the listener's open-connection count.
 async fn tunnel(
     downstream: OnUpgrade,
     upstream: OnUpgrade,
-    guard: RequestGuard,
-    slot: Permit,
+    held: (RequestGuard, Permit, ConnectionGuard),
     idle: Duration,
 ) {
     let (down, up) = match tokio::try_join!(downstream, upstream) {
@@ -880,7 +884,7 @@ async fn tunnel(
         Ok((sent, received)) => debug!(sent, received, "upgraded connection closed"),
         Err(e) => debug!(error = %e, "upgraded connection ended"),
     }
-    drop((guard, slot));
+    drop(held);
 }
 
 fn empty_body() -> ProxyBody {

@@ -14,8 +14,11 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::Instant;
 
-/// Per-direction copy buffer, as in `tokio::io::copy_bidirectional`.
-const BUFFER: usize = 8 * 1024;
+/// Per-direction copy buffer: small while a tunnel is quiet (most WebSockets
+/// are), doubling up to [`MAX_BUFFER`] while reads keep filling it. The M5
+/// soak held 10,000 tunnels; fixed 8 KiB buffers cost 16 KiB each of them.
+const MIN_BUFFER: usize = 2 * 1024;
+const MAX_BUFFER: usize = 16 * 1024;
 
 /// Why a relay ended early.
 #[derive(Debug, thiserror::Error)]
@@ -62,7 +65,7 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut buf = vec![0u8; BUFFER];
+    let mut buf = vec![0u8; MIN_BUFFER];
     let mut total = 0u64;
     loop {
         let n = r.read(&mut buf).await?;
@@ -74,6 +77,9 @@ where
         last.store(now, Ordering::Relaxed);
         w.write_all(buf.get(..n).unwrap_or_default()).await?;
         total += n as u64;
+        if n == buf.len() && buf.len() < MAX_BUFFER {
+            buf.resize(buf.len() * 2, 0);
+        }
     }
 }
 
@@ -106,6 +112,26 @@ mod tests {
         cr.read_to_end(&mut answer).await.unwrap();
         assert_eq!(answer, b"pong!");
         assert_eq!(relay.await.unwrap().unwrap(), (4, 5));
+    }
+
+    #[tokio::test]
+    async fn bulk_transfers_arrive_intact() {
+        let (client, a) = tokio::io::duplex(64 * 1024);
+        let (b, backend) = tokio::io::duplex(64 * 1024);
+        let relay = tokio::spawn(relay(a, b, Duration::from_secs(60)));
+        let payload: Vec<u8> = (0..1_000_000u32).map(|i| (i % 251) as u8).collect();
+        let (_cr, mut cw) = tokio::io::split(client);
+        let (mut br, _bw) = tokio::io::split(backend);
+        let sent = payload.clone();
+        let writer = tokio::spawn(async move {
+            cw.write_all(&sent).await.unwrap();
+            cw.shutdown().await.unwrap();
+        });
+        let mut got = Vec::new();
+        br.read_to_end(&mut got).await.unwrap();
+        writer.await.unwrap();
+        assert_eq!(got, payload);
+        relay.abort();
     }
 
     #[tokio::test(start_paused = true)]

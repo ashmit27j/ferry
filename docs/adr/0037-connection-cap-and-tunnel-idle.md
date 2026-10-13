@@ -54,5 +54,13 @@ upgraded streams.
 - The cap counts connections per listener and per replica. A cluster-wide
   cap is the replica count times the limit, the same model as rate limits
   (ADR 0022).
+- An upgraded connection stays in the open-connection count (and under
+  the cap) for the life of its tunnel. hyper releases it from the HTTP
+  server when it upgrades, so the tunnel holds its own guard. The M5 dry
+  run caught this: without it, open tunnels did not count.
+- A tunnel also holds its cluster's circuit-breaker request slot (ADR
+  0025). A cluster that carries many long-lived WebSockets needs
+  `max_requests` and `max_connections` above its peak tunnel count. The
+  defaults (1024, as in Envoy) cut the M5 dry run off at 1,024 sockets.
 - Connections refused by the cap get a TCP close with no HTTP response. That
   matches Envoy and avoids spending work on a request we will not serve.

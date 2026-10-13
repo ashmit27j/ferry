@@ -224,6 +224,15 @@ impl ListenerStats {
         self.active_connections.fetch_add(1, Ordering::Relaxed);
         ConnectionGuard(Arc::clone(self))
     }
+
+    /// Keeps an upgraded connection (a WebSocket tunnel) counted as open
+    /// after the HTTP server hands it over, without counting a new
+    /// connection. The guard marks it closed when dropped.
+    #[must_use]
+    pub fn hold_upgraded(self: &Arc<Self>) -> ConnectionGuard {
+        self.active_connections.fetch_add(1, Ordering::Relaxed);
+        ConnectionGuard(Arc::clone(self))
+    }
 }
 
 /// An open downstream connection; see [`ListenerStats::open_connection`].
