@@ -23,10 +23,13 @@ cargo audit --deny warnings
 cargo llvm-cov nextest --workspace --summary-only
 cargo bench -p ferry-bench                    # criterion; record in bench/RESULTS.md
 cargo +nightly fuzz run config_yaml fuzz/corpus/config_yaml fuzz/seeds/config_yaml   # nightly + cargo-fuzz, Linux/macOS
+FUZZ_SECONDS=600 bench/exit/m5/fuzz.sh        # every fuzz target in a nightly container (any host)
 bench/exit/run-m1.sh                          # M1 exit test in Docker (see bench/README.md)
 bench/exit/run-m3.sh                          # M3 exit: Prometheus/Grafana/Tempo stack, SLO + trace checks
 FRESH=1 bench/exit/run-m4.sh                  # M4 exit: new kind cluster + MetalLB, helm install, smoke, conformance
 EXTENDED=1 PHASES=conformance bench/exit/run-m4.sh   # conformance with the extended features claimed
+DURATION=4h bench/exit/run-m5.sh              # M5 exit: soak + chaos + 10k WebSockets, SLO and memory checks
+bench/exit/m5/alerts-test.sh                  # promtool check + unit tests of the alerting rules
 cargo bench -p ferry-bench --bench controller # translation and snapshot serialisation
 python crates/ferry-controller/gen/gateway_api.py v1.6.3 --crds   # regenerate Gateway API types + chart CRDs
 cargo run -p ferry -- crds > deploy/helm/ferry/crds/ferrypolicies.yaml  # after changing FerryPolicy (a test checks)
@@ -41,12 +44,16 @@ cargo run -p ferry -- proxy --controller https://ctl:18000 --gateway ns/gw --con
 cargo run -p ferry -- controller --no-leader-election --proxy-template t.yaml   # needs a kubeconfig
 cargo run -p ferry-testkit --bin mock-backend -- --name a --http 127.0.0.1:9001 --grpc 127.0.0.1:9101 --ws 127.0.0.1:9201
 cargo run -p ferry-testkit --bin trace-client -- --url http://127.0.0.1:8080/ --otlp-endpoint http://127.0.0.1:4317
+cargo run -p ferry-testkit --bin ws-flood -- --url ws://127.0.0.1:8080/ws --count 1000 --hold 60s
 curl localhost:9901/metrics                   # admin API: /live /ready /metrics /config /clusters
 ```
 
 All of fmt, clippy, nextest, deny and audit must pass before every commit. CI
 (`.github/workflows/ci.yml`) runs exactly these, plus coverage. The nightly
-workflow fuzzes each target for 10 minutes.
+workflow fuzzes each target for 10 minutes. `release.yml` runs release-please
+on main; merging its release PR publishes a multi-arch image and the Helm
+chart to GHCR, Cosign-signed (keyless), with an SPDX SBOM and provenance.
+Every action is pinned by commit SHA (version in a comment); keep it so.
 
 Logging: `FERRY_LOG` takes an `EnvFilter` (default `info`); `--log-format json`
 or `FERRY_LOG_FORMAT=json` switches to JSON lines on stderr.
@@ -74,7 +81,7 @@ YAML ──ferry-config──▶ Config ──into_snapshot()──▶ Snapshot 
   │              prepare() loads certs/CAs (fallible, no side effects), then
   │              Control::build reuses unchanged clusters/routers/limiters,
   │              endpoint state, pools, health checkers ─▶ Runtime ─ArcSwap::store
-accept ─▶ [PROXY v1/v2] ─▶ [TLS: SNI cert, ALPN h2/http1.1] ─▶ hyper auto (h1/h2, upgrades)
+accept (closed if the listener holds max_connections) ─▶ [PROXY v1/v2] ─▶ [TLS: SNI cert, ALPN h2/http1.1] ─▶ hyper auto (h1/h2, upgrades)
        ─▶ limits (headers, body 413, h2 streams, Rapid Reset caps)
        ─▶ Router (host index ▶ path/method/header/query) ─▶ route rate limit (GCRA, 429)
        ─▶ redirect | request filters + X-Forwarded-For/Proto + X-Request-Id
@@ -85,12 +92,14 @@ accept ─▶ [PROXY v1/v2] ─▶ [TLS: SNI cert, ALPN h2/http1.1] ─▶ hyper
           ├─ safe retry: request never arrived (connect fail, unsent, idempotent reset)
           ├─ policy retry: codes / reset / per-try timeout, spends the retry budget
           └─ outcome ▶ outlier detection (eject, sweep back)
-       ─▶ 101: byte tunnel (WebSocket); else response filters, idle-timed body
+       ─▶ 101: byte tunnel (tunnel.rs: tunnel_idle timeout, growing buffers, counted
+          as an open connection); else response filters, idle-timed body
 Exchange (observe.rs): span + log fields at arrival ▶ route/cluster/reason/upstream
        wait filled in ▶ at headers: overhead histogram ▶ Observed body: on finish or
        drop, RED counters + duration, span end, access-log line (writer thread)
 admin (axum, own port): /live /ready (503 draining) /metrics /config /clusters
-       /metrics = Metrics families + StateCollector (reads Runtime at scrape)
+       /metrics = Metrics families + StateCollector (reads Runtime at scrape,
+       including certificate expiry); ferry_controller_connected once following
 health checkers (per endpoint, TLS-aware) ─▶ EndpointState ─▶ ClusterBalancer::refresh
 maintenance loop: outlier sweep 500 ms, cert re-read 1 s, idle pool sweep 15 s
 shutdown: drain.delay (accept, Connection: close) ▶ GOAWAY/close ▶ drain.timeout
@@ -129,7 +138,8 @@ reload: plan listener slots (keep / rename / bind new / retire) ▶ prepare ▶ 
   rotation, client configs, ADR 0023/0024), `proxy_protocol.rs` (ADR 0017),
   `watch.rs` (ADR 0015), `observe.rs` (`Exchange`, `Observed` body),
   `collector.rs` (scrape-time gauges), `admin.rs` (ADR 0030), `remote.rs`
-  (follows the controller's snapshot stream, ADR 0033).
+  (follows the controller's snapshot stream, ADR 0033), `tunnel.rs` (relay
+  with idle timeout, ADR 0037).
 - Metric handles live in the runtime (`ListenerRuntime.stats`/`route_stats`/
   `unmatched`, `ClusterRuntime.stats`); never look a metric up per request.
   New metrics: add to the stats struct and the `Families` collector, then to
@@ -151,26 +161,38 @@ reload: plan listener slots (keep / rename / bind new / retire) ▶ prepare ▶ 
   write only on change), `provision.rs` (`ProxyTemplate`, fleet rendering),
   `server.rs` (`Hub`, gRPC server), `leader.rs` (Lease), `certgen.rs`,
   `run.rs` (reflectors, reconcile loop, writes, `/healthz` `/readyz`
-  `/debug/proxies` on 18001).
+  `/metrics` `/debug/proxies` on 18001), `metrics.rs` (controller metrics,
+  read from the `Hub` at scrape).
 - Gateway API semantics live in `translate`; test them there with YAML
   fixtures (`translate/tests.rs`), not on a cluster. Container ports are
   Gateway ports below 1024 plus 10000; 19001 is the proxy admin port.
 - `deploy/helm/ferry`: chart (CRDs, certgen hook, controller, RBAC,
-  GatewayClass, optional Gateway, PodMonitor); `values-kind.yaml` for kind.
-  The proxy template ConfigMap must match `ProxyTemplate` (unknown fields are
-  rejected).
+  GatewayClass, optional Gateway, PodMonitors, PrometheusRule from
+  `files/alerts.yaml`, NetworkPolicies); `values-kind.yaml` for kind. The
+  proxy template ConfigMap must match `ProxyTemplate` (unknown fields are
+  rejected); the controller renders each fleet's NetworkPolicy.
+- Alerts: every rule in `files/alerts.yaml` needs a runbook in
+  `docs/runbooks/` (listed in its README) and only queries exported metrics
+  (`tests/it/alerts.rs`); behaviour is unit-tested with promtool
+  (`bench/exit/m5/alerts-test.yaml`). Proxy series carry `fleet` (from the
+  PodMonitor), so group alerts by it.
+- Security docs: `SECURITY.md`, `docs/security/threat-model.md` (update it
+  when adding a listener, parser, permission or trust boundary).
+- `bench/exit/m5/`: soak config, `ferry-env.sh`, `chaos.sh` (kill, netem
+  latency and loss), `m5-check.py` (SLOs and memory slope from
+  Prometheus), `fuzz.sh`, promtool tests.
 - `bench/exit/m4/`: runner image (kind, kubectl, helm, docker CLI, compiled
   conformance suite), `e2e.sh` (phases setup, smoke, conformance), `smoke.yaml`.
 - `ferry-testkit`: mocks with `Behavior { latency, error_rate, error_status,
   tracing }` (`with_tracing` makes the HTTP mock record server spans);
-  `trace-client` binary;
+  `trace-client` and `ws-flood` (hold N WebSockets) binaries;
   the HTTP mock honours `x-mock-latency-ms`, `x-mock-status` and
   `x-mock-body-delay-ms`, and `http::spawn_tls` reports ALPN and client
   certificates. `MockServer::set_healthy` flips `/healthz` and gRPC health.
 - `tests/`: `TcpBalancer` (L4 stand-in for an NLB), `run_load`, raw-frame
   HTTP/2 attacks, gRPC interop, TLS/mTLS, drain and rolling restart;
   `TestProxy::start_with_telemetry`, `serve_admin`, `metrics_text`, `metric`;
-  `tracing.rs` runs an OTLP collector in-process; `dashboard.rs`.
+  `tracing.rs` runs an OTLP collector in-process; `dashboard.rs`, `alerts.rs`.
 - `deploy/grafana/` (dashboard + generator, ADR 0031), `deploy/observability/`
   (collector, Tempo, Prometheus, Grafana provisioning for run-m3.sh).
 
@@ -184,6 +206,9 @@ reload: plan listener slots (keep / rename / bind new / retire) ▶ prepare ▶ 
 - Every public item is documented (`missing_docs` is an error in CI). Every module
   has unit tests. Every bug fix comes with a regression test.
 - Use proptest for balancers, matching, retry budgets and config validation.
+- Every parser of untrusted input (requests, headers, configs, snapshots,
+  manifests) gets a fuzz target in `fuzz/` with seeds, and joins the nightly
+  matrix. Values Ferry prints must parse back (fuzz targets check this).
 - Conventional commits (`feat(lb): ...`, `fix(proxy): ...`, `docs(adr): ...`),
   small and focused.
 - Ambiguity: do what Envoy or the Gateway API does, write an ADR, and continue.
@@ -197,7 +222,9 @@ reload: plan listener slots (keep / rename / bind new / retire) ▶ prepare ▶ 
 - Windows dev boxes work (jemalloc is disabled on MSVC; SIGTERM handling is
   Unix-only; a refused TCP connect takes ~2 s, so retry tests are slow there).
   CI on Linux is authoritative. Files must stay LF (`.gitattributes`); when
-  editing with Python on Windows, open files with `newline='\n'`.
+  editing with Python on Windows, open files with `newline='\n'`. Link
+  errors about PDBs (LNK1201/LNK1318) or "os error 112" mean the disk is
+  full: `cargo clean --profile dev` (dev builds keep line tables only).
 
 ## Milestone status
 
