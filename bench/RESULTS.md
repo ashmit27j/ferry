@@ -170,3 +170,106 @@ M1, but `lb/backend_split_pick` exercises `WeightedSelector`, whose code did not
 change in M2. Treat those three as run-to-run noise on a desktop machine (no
 CPU pinning, turbo enabled), not a regression; the gate on a dedicated Linux
 host will settle it.
+
+## M3 — 2026-10-13 (exit run and regression check, same Linux VM as M1)
+
+### Exit criteria (`bench/exit/run-m3.sh`)
+
+Ferry with metrics, tracing (1% of new traces, plus every traced caller) and
+the access log on; three traced mock backends; OpenTelemetry Collector 0.130,
+Tempo 2.8.1, Prometheus 3.5.0 (5 s scrapes of the admin API) and Grafana
+12.1.0, all in Docker. k6 sent 2,000 req/s for 180 s; backend `c` was killed
+at t = 60 s and the config reloaded every 5 s. This run checks observability,
+not latency (nothing is CPU-pinned).
+
+**Load:** 360,000 requests, **0 failed, 0 dropped iterations**; p50 0.26 ms,
+p99 0.42 ms (k6, through Docker networking).
+
+**Every SLO read from the dashboard.** `bench/exit/m3-check.py` ran each SLO
+panel's query through Prometheus (variables at "all", `$__rate_interval` =
+1m, `$__range` = 5m) at the end of the run (`results/m3-check.json`):
+
+| SLO panel | Value | SLO |
+| --- | --- | --- |
+| Added latency p50 | 13 µs | < 0.2 ms |
+| Added latency p99 | 45 µs (p99.9 60 µs) | < 1 ms |
+| Requests per core-second | 7,266 | context for "per core"¹ |
+| Success ratio | 100% | ≥ 99.95% |
+| Failed or cut-off requests over the range | 0 | 0 during reloads (12/min) |
+| Resident memory growth | −7 MB/h (31 MB RSS) | flat |
+
+25 of 27 panels returned data; "Local replies by reason" (the 429s happened
+in the first seconds, outside the last minute's rate) and "gRPC status" (no
+gRPC traffic) were empty, as expected. Grafana loaded the provisioned
+dashboard (uid `ferry-overview`) and answered its queries through its
+Prometheus datasource.
+
+¹ At 2,000 req/s with access log and tracing on and an idle-ish event loop,
+each request costs more CPU than at 10k req/s, where batching amortises
+wakeups; this panel is for the 10k req/s gate on the deployment target.
+
+**One trace spans client → Ferry → backend.** `trace-client` sent three
+traced requests; Tempo returned each trace with four spans from three
+services, chained:
+
+```
+trace-client:CLIENT GET -> ferry:SERVER "GET bench" -> ferry:CLIENT GET -> mock-b:SERVER "GET /traced"
+```
+
+The added-latency figures come from Ferry's own histogram (arrival to response
+headers minus upstream waits). They exclude kernel and network time, so they
+are not the same measurement as the k6 subtraction below; both are reported.
+
+### Regression check: M1 exit test with M3 telemetry (`bench/exit/run-m1.sh`)
+
+Same environment as M1 and M2: Ferry on one core, 10k req/s. Metrics are always
+on and the admin API listens; tracing is off.
+
+| Run | Requests | Failed | Dropped it. | p50 | p90 | p99 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Backend direct | 299,874 | 0 | 127 | 0.086 ms | 0.165 ms | 0.342 ms |
+| Ferry, steady (metrics) | 300,001 | 0 | 0 | 0.161 ms | 0.202 ms | 1.00 ms |
+| **Ferry, kill + 66 reloads (metrics)** | **600,001** | **0** | **0** | 0.161 ms | 0.203 ms | 0.520 ms |
+| Ferry, steady (metrics + access log) | 299,973 | 0 | 28 | 0.189 ms | 0.239 ms | 2.20 ms |
+| Ferry, kill + reloads (metrics + access log) | 600,002 | 0 | 0 | 0.184 ms | 0.233 ms | 0.975 ms |
+
+- Zero errors under kill and reload, as in M1 and M2.
+- Metrics cost nothing visible at p50 (0.163 ms in M2, 0.161 ms now).
+- The access log adds about 21–27 µs at p50 (serialising the line and handing
+  it to the writer thread, plus the writer's own CPU on the same core).
+- p99 moves between 0.5 and 5 ms from run to run in this VM, in both
+  directions, for the loopback reasons analysed under M1. It is still unproven
+  and is measured on the Linux deployment target.
+- Ferry's RSS after the chaos run: 48 MB (M1: 42 MB).
+
+### Micro-benchmarks (`cargo bench -p ferry-bench`, Windows, i7-12700F)
+
+| Benchmark | M2 | M3 |
+| --- | --- | --- |
+| `telemetry/histogram_observe` (new) | — | 9.1 ns |
+| `telemetry/route_record` (counter + histogram, new) | — | 13.0 ns |
+| `telemetry/access_log_line` (serialise one line, new) | — | 647 ns |
+| `telemetry/spans_unsampled` (server + client span, inject, new) | — | 763 ns |
+| `telemetry/spans_sampled` (new) | — | 1.05 µs |
+| `telemetry/scrape_100_routes` (encode /metrics, new) | — | 312 µs |
+| `lb/round_robin_pick_16` | 38.0 ns | 23.8 ns |
+| `lb/weighted_round_robin_pick_16` | 56.0 ns | 37.6 ns |
+| `lb/backend_split_pick` | 29.3 ns | 21.3 ns |
+| `lb/maglev_pick_16` | 16.8 ns | 16.9 ns |
+| `lb/retry_budget_deposit` | 35.7 ns | 36.0 ns |
+| `lb/breaker_acquire_release` | 15.8 ns | 15.9 ns |
+| `edge/proxy_protocol_v1_parse` | 22.5 ns | 82.9 ns² |
+| `edge/proxy_protocol_v2_parse` | 6.1 ns | 8.4 ns |
+| `router/100_routes_prefix_hit` | 45.2 ns | 43.8 ns |
+| `router/1000_routes_prefix_hit` | 43.9 ns | 44.3 ns |
+| `config/parse_validate_100_routes` | 2.44 ms | 2.46 ms |
+
+The round-robin, weighted and split picks are back at their M1 values, which
+supports reading M2's numbers as noise.
+
+² `proxy_protocol.rs` did not change in M3, yet v1 parsing reads 3.7× slower,
+reproducibly across two runs today. It is still under 0.1 µs per connection
+(not per request). Recorded as an open item to profile, not explained.
+
+Per request, telemetry costs about 22 ns with tracing and the access log off,
+about 0.7 µs more with the access log on, and about 0.8 µs more with tracing on.

@@ -6,13 +6,15 @@ Ferry terminates TLS and proxies HTTP/1.1, HTTP/2, gRPC and WebSockets to backen
 pods. It is configured through the Kubernetes Gateway API and runs on AWS EKS
 behind a Network Load Balancer.
 
-> **Status: M2 (TLS and resilience).** TLS termination (SNI, hot certificate
-> rotation) and upstream mTLS; HTTP/1.1, HTTP/2, gRPC and WebSocket proxying;
-> Gateway API matching and filters; five load-balancing policies; health checks
-> and outlier ejection; timeouts, budgeted retries, circuit breakers and rate
-> limits; PROXY protocol; request limits and HTTP/2 attack defences; zero-drop
-> rolling restarts. Metrics and the Kubernetes controller are planned for M3–M4.
-> See [`CLAUDE.md`](CLAUDE.md) for milestone status.
+> **Status: M3 (observability and admin).** TLS termination (SNI, hot
+> certificate rotation) and upstream mTLS; HTTP/1.1, HTTP/2, gRPC and WebSocket
+> proxying; Gateway API matching and filters; five load-balancing policies;
+> health checks and outlier ejection; timeouts, budgeted retries, circuit
+> breakers and rate limits; PROXY protocol; request limits and HTTP/2 attack
+> defences; zero-drop rolling restarts; Prometheus metrics, OpenTelemetry
+> tracing, JSON access logs, an admin API and a Grafana dashboard. The
+> Kubernetes controller is planned for M4. See [`CLAUDE.md`](CLAUDE.md) for
+> milestone status.
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Helvetica Neue, Arial", "primaryColor": "#ffffff", "primaryTextColor": "#171717", "primaryBorderColor": "#dfdfdf", "lineColor": "#707070", "secondaryColor": "#fafafa", "tertiaryColor": "#ffffff"}}}%%
@@ -51,8 +53,28 @@ Validate a config without running it, or print its JSON Schema:
 
 ```sh
 cargo run -p ferry -- check-config examples/hello.yaml
+cargo run -p ferry -- check-config --output json --print examples/hello.yaml
 cargo run -p ferry -- check-config --schema > ferry.schema.json
 ```
+
+## Observability
+
+The admin API listens on `127.0.0.1:9901` (`--admin-address`, or `off`):
+
+```sh
+curl -s localhost:9901/ready      # 200, or 503 once draining
+curl -s localhost:9901/metrics    # Prometheus (OpenMetrics text)
+curl -s localhost:9901/clusters   # endpoint health, ejection, load, pools
+curl -s localhost:9901/config     # active config, private keys redacted
+```
+
+JSON access logs: `--access-log stdout` (or a path). Traces: set
+`--otlp-endpoint http://collector:4317` (or `OTEL_EXPORTER_OTLP_ENDPOINT`);
+Ferry continues incoming W3C `traceparent` headers and adds a span per
+upstream attempt. The Grafana dashboard is
+[`deploy/grafana/ferry-dashboard.json`](deploy/grafana/ferry-dashboard.json),
+SLOs first. [`deploy/observability`](deploy/observability/README.md) runs the
+whole stack (Prometheus, Grafana, OpenTelemetry Collector, Tempo) locally.
 
 ## Repository layout
 
@@ -64,11 +86,12 @@ cargo run -p ferry -- check-config --schema > ferry.schema.json
 | `crates/ferry-proxy` | Listeners, router, forwarding, hot swap, drain |
 | `crates/ferry-controller` | Gateway API reconciler (M4) |
 | `crates/ferry-api` | Protobuf + gRPC for controller → proxy snapshots |
-| `crates/ferry-telemetry` | Logging (metrics and tracing in M3) |
-| `crates/ferry-testkit` | Mock HTTP/h2c/gRPC/WebSocket backends |
+| `crates/ferry-telemetry` | Metrics, tracing, access logs, logging |
+| `crates/ferry-testkit` | Mock HTTP/h2c/gRPC/WebSocket backends, trace client |
 | `tests/` | In-process integration tests |
 | `fuzz/` | cargo-fuzz targets |
-| `bench/` | criterion, k6, [results](bench/RESULTS.md) |
+| `bench/` | criterion, k6, exit tests, [results](bench/RESULTS.md) |
+| `deploy/` | Grafana dashboard, local observability stack, Helm (M4) |
 | `docs/adr/` | Architecture decision records |
 
 ## Development
