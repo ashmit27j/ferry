@@ -71,11 +71,21 @@ path = "it/grpc.rs"
 name = "h2_attacks"
 path = "it/h2_attacks.rs"
 
+[[test]]
+name = "observability"
+path = "it/observability.rs"
+
+[[test]]
+name = "tracing"
+path = "it/tracing.rs"
+
 [dependencies]
 bytes.workspace = true
 ferry-config.workspace = true
 ferry-proxy.workspace = true
+ferry-telemetry.workspace = true
 ferry-testkit.workspace = true
+opentelemetry-proto = { workspace = true, features = ["gen-tonic", "trace"] }
 http.workspace = true
 http-body-util.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
@@ -89,7 +99,7 @@ tokio-rustls.workspace = true
 hyper = { workspace = true, features = ["client", "http1", "http2"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
 tokio-util.workspace = true
-tonic = { workspace = true, features = ["channel", "tls-aws-lc"] }
+tonic = { workspace = true, features = ["channel", "tls-aws-lc", "server", "router"] }
 tokio-stream.workspace = true
 tempfile.workspace = true
 

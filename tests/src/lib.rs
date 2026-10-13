@@ -14,6 +14,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use ferry_config::{Snapshot, SnapshotVersion};
 use ferry_proxy::{Drain, Proxy, ProxyError, ReloadHandle};
+use ferry_telemetry::Telemetry;
 use http::{HeaderMap, Request, StatusCode};
 use http_body_util::{BodyExt, Empty, Full};
 use hyper_util::client::legacy::Client;
@@ -85,7 +86,23 @@ impl TestProxy {
 
     /// Like [`TestProxy::start`] with full drain settings.
     pub async fn start_with(yaml: &str, drain: Drain) -> Self {
-        let proxy = Proxy::bind(snapshot(yaml, 1)).await.expect("proxy binds");
+        Self::start_full(yaml, drain, Arc::new(Telemetry::default())).await
+    }
+
+    /// Like [`TestProxy::start`], reporting through `telemetry`.
+    pub async fn start_with_telemetry(yaml: &str, telemetry: Arc<Telemetry>) -> Self {
+        let drain = Drain {
+            delay: Duration::ZERO,
+            timeout: Duration::from_secs(5),
+        };
+        Self::start_full(yaml, drain, telemetry).await
+    }
+
+    /// Binds and starts a proxy with every setting explicit.
+    pub async fn start_full(yaml: &str, drain: Drain, telemetry: Arc<Telemetry>) -> Self {
+        let proxy = Proxy::bind_with(snapshot(yaml, 1), telemetry)
+            .await
+            .expect("proxy binds");
         let addr = proxy.local_addrs()[0];
         let reload = proxy.reload_handle();
         let (tx, rx) = oneshot::channel();
@@ -101,6 +118,24 @@ impl TestProxy {
             shutdown: Some(tx),
             task: Some(task),
         }
+    }
+
+    /// Serves the admin API on an ephemeral port until the test ends.
+    pub async fn serve_admin(&self) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind(any_port()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(ferry_proxy::admin::serve(
+            listener,
+            self.reload.clone(),
+            std::future::pending(),
+        ));
+        addr
+    }
+
+    /// The proxy's metrics in the exposition format.
+    #[must_use]
+    pub fn metrics_text(&self) -> String {
+        self.reload.telemetry().metrics.encode().unwrap()
     }
 
     /// Starts draining without waiting for it to finish.
@@ -296,6 +331,14 @@ pub async fn run_load(
         }
     }
     total
+}
+
+/// The value of one series (`name{labels}` exactly as exposed) in metrics
+/// text, if present.
+#[must_use]
+pub fn metric(text: &str, series: &str) -> Option<f64> {
+    text.lines()
+        .find_map(|l| l.strip_prefix(series)?.strip_prefix(' ')?.parse().ok())
 }
 
 /// Polls `cond` every 10 ms until it holds, panicking after `timeout`.
