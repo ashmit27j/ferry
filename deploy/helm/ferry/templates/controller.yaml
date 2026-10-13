@@ -46,6 +46,10 @@ data:
     controllerServerName: {{ include "ferry.controllerHost" . | quote }}
     tlsSecret: {{ include "ferry.proxyTLS" . | quote }}
     serviceAccount: {{ include "ferry.proxy" . | quote }}
+    {{- if .Values.networkPolicy.enabled }}
+    networkPolicy:
+      metricsFrom: {{ .Values.networkPolicy.metricsFrom | default list | toJson }}
+    {{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment

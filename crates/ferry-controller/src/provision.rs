@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 
 use k8s_openapi::api::core::v1::{LocalObjectReference, ResourceRequirements, Toleration};
+use k8s_openapi::api::networking::v1::NetworkPolicyPeer;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -77,6 +78,20 @@ pub struct ProxyTemplate {
     pub tls_secret: Option<String>,
     /// Service account of proxy pods (they need no API access).
     pub service_account: String,
+    /// A NetworkPolicy per fleet; `None` creates none.
+    pub network_policy: Option<NetworkPolicyTemplate>,
+}
+
+/// The fleet's NetworkPolicy: listener ports stay open to every source (the
+/// NLB sends clients straight to pod IPs); the admin port only admits
+/// `metrics_from`. Egress is left open, since proxies reach arbitrary
+/// backends and the controller.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct NetworkPolicyTemplate {
+    /// Peers allowed to scrape the admin port; empty admits none (kubelet
+    /// probes are not subject to NetworkPolicy).
+    pub metrics_from: Vec<NetworkPolicyPeer>,
 }
 
 /// HPA settings.
@@ -142,6 +157,7 @@ impl Default for ProxyTemplate {
             controller_server_name: "ferry-controller.ferry-system.svc".into(),
             tls_secret: Some("ferry-proxy-tls".into()),
             service_account: "ferry-proxy".into(),
+            network_policy: None,
         }
     }
 }
@@ -242,6 +258,30 @@ pub fn render(
                         "target": { "type": "Utilization", "averageUtilization": a.target_cpu_utilization },
                     },
                 }],
+            },
+        }));
+    }
+    if let Some(np) = &t.network_policy {
+        let mut ingress = Vec::new();
+        if !ports.is_empty() {
+            ingress.push(json!({
+                "ports": ports.iter().map(|p| json!({ "port": p.container_port, "protocol": "TCP" })).collect::<Vec<_>>(),
+            }));
+        }
+        if !np.metrics_from.is_empty() {
+            ingress.push(json!({
+                "from": np.metrics_from,
+                "ports": [{ "port": ADMIN_PORT, "protocol": "TCP" }],
+            }));
+        }
+        out.push(json!({
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": meta(json!({})),
+            "spec": {
+                "podSelector": { "matchLabels": selector },
+                "policyTypes": ["Ingress"],
+                "ingress": ingress,
             },
         }));
     }
@@ -459,6 +499,54 @@ mod tests {
             ]
         );
         assert!(docs[0]["spec"].get("replicas").is_none());
+    }
+
+    #[test]
+    fn network_policy_opens_listeners_and_limits_the_admin_port() {
+        let t: ProxyTemplate = serde_saphyr::from_str(
+            "networkPolicy:
+  metricsFrom:
+    - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } }
+",
+        )
+        .unwrap();
+        let docs = render(&ObjKey::new("infra", "web"), &ports(), &t, "ferry-system");
+        let np = docs.iter().find(|d| d["kind"] == "NetworkPolicy").unwrap();
+        assert_eq!(np["metadata"]["name"], "ferry-infra-web");
+        assert_eq!(
+            np["spec"]["podSelector"]["matchLabels"][NAME_LABEL],
+            "ferry-proxy"
+        );
+        let ingress = np["spec"]["ingress"].as_array().unwrap();
+        assert!(
+            ingress[0].get("from").is_none(),
+            "listeners admit every source"
+        );
+        assert_eq!(ingress[0]["ports"][0]["port"], 10_080);
+        assert_eq!(
+            ingress[1]["from"][0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"],
+            "monitoring"
+        );
+        assert_eq!(ingress[1]["ports"][0]["port"], ADMIN_PORT);
+
+        // Without ports or scrapers, the pods admit nothing but probes.
+        let closed = ProxyTemplate {
+            network_policy: Some(NetworkPolicyTemplate::default()),
+            ..ProxyTemplate::default()
+        };
+        let docs = render(&ObjKey::new("infra", "web"), &[], &closed, "ferry-system");
+        let np = docs.iter().find(|d| d["kind"] == "NetworkPolicy").unwrap();
+        assert_eq!(np["spec"]["ingress"], json!([]));
+        assert!(
+            render(
+                &ObjKey::new("infra", "web"),
+                &ports(),
+                &ProxyTemplate::default(),
+                "ns"
+            )
+            .iter()
+            .all(|d| d["kind"] != "NetworkPolicy")
+        );
     }
 
     #[test]

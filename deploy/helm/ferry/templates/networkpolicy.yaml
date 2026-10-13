@@ -1,0 +1,35 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /*
+The controller: proxies of this release may open the snapshot stream
+(18000, mutual TLS on top); `metricsFrom` may scrape 18001. Egress stays
+open: the controller talks to the Kubernetes API, whose address differs per
+cluster. Each proxy fleet's policy is rendered by the controller with the
+fleet (it knows the listener ports).
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ferry.controller" . }}
+  labels:
+    {{- include "ferry.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ferry-controller
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ferry-proxy
+              app.kubernetes.io/managed-by: ferry-controller
+      ports:
+        - { port: 18000, protocol: TCP }
+    {{- with .Values.networkPolicy.metricsFrom }}
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - { port: 18001, protocol: TCP }
+    {{- end }}
+{{- end }}
