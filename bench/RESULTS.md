@@ -355,3 +355,125 @@ Everything is 3–10% slower. The benchmarks ran while the kind cluster and the
 conformance suite were up in Docker on the same machine, so this is read as
 load from the shared box, not a regression. The M1 exit test was not
 re-run for M4.
+
+## M5 — 2026-10-13 (hardening, dev workstation; the long soak moves to Linux)
+
+### Soak with chaos and 10,000 WebSockets (`bench/exit/run-m5.sh`, partial)
+
+Ferry pinned to one core (`cpuset`), 10,000 req/s from k6, 10,000 WebSockets
+held open the whole time (one message each every 30 s, about 333 msg/s), a
+config reload every minute, and chaos every 20 minutes: backend c killed and
+restarted after 60 s, 200 ± 50 ms netem latency on backend b for 3 minutes,
+5% packet loss on backend a for 3 minutes. The 4-hour gate run was stopped
+after 30 minutes. At the plan owner's request, the long soak runs on a Linux
+host. The partial results are in `results/m5-partial/`.
+
+| Check (30 min, chaos included) | Result |
+| --- | --- |
+| Requests (Ferry counters) | 17.3 M, **0 5xx** (success 100%) |
+| k6 | 15.0 M requests, **0 failed**; 474 dropped iterations (0.003%), around backend kills |
+| Added latency, Ferry's histogram | **p50 12.6 µs, p99 24.9 µs** (SLO 0.2 ms / 1 ms) |
+| k6 latency (through Docker networking) | median-segment p50 0.197 ms, worst-segment p99 3.48 ms |
+| WebSockets | 11,000 downstream connections the whole run (10,000 tunnels + k6) |
+| Reloads | 30, 0 failed |
+| Retries / ejections | 987 / 4 (chaos) |
+| Resident memory | 113-140 MB, following the upstream idle pool |
+| Open file descriptors | 21,457-21,806; all sockets ESTABLISHED, none in CLOSE_WAIT |
+
+Thirty minutes is too short for the flatness verdict. Memory and descriptors
+moved with the upstream idle pool: it shrank when backend c was killed and
+grew while 200 ms of latency on b required more concurrent connections.
+Neither looked like a leak. The 4-hour (or 72-hour) run on Linux decides it.
+
+**What the dry runs found** (fixed before the gate run):
+- Only 1,024 of 2,000 WebSockets opened: every tunnel holds a circuit-breaker
+  request slot, and the default limit is 1,024 (as in Envoy). The soak's
+  WebSocket cluster raises it; ADR 0037 records the consequence.
+- Open tunnels were missing from `ferry_downstream_active_connections` and
+  escaped `max_connections` (hyper releases upgraded connections). The
+  tunnel now holds its own guard; regression test added.
+- 10,000 tunnels used 208 MB with fixed 8 KiB relay buffers. Growing
+  buffers (2 KiB, doubling to 16 KiB) brought it to 120 MB.
+- A CPU quota (`--cpus 1`) throttled Ferry in 100 ms bursts (385 dropped
+  iterations in 3 minutes). A `cpuset` pin dropped 61.
+
+### Fuzzing (`bench/exit/m5/fuzz.sh`, 10 minutes per target)
+
+| Target | Input | Runs | Coverage | Result |
+| --- | --- | --- | --- | --- |
+| `config_yaml` | config files | 2.0 M | 18,965 | clean |
+| `proxy_protocol` | PROXY v1/v2 headers | 393 M | 159 | clean |
+| `snapshot_json` | controller → proxy payload | 18.0 M | 12,239 | clean |
+| `header_values` | `grpc-timeout`, GEP-2257 durations | 387 M | 136 | clean after two fixes |
+| `router` | hostile request heads vs every match type | 23.9 M | 2,076 | clean |
+| `gateway_manifests` | Kubernetes manifests → translator | 0.9 M | 18,219 | clean |
+
+Two bugs found and fixed, each with a regression test and a seed:
+- `grpc-timeout` parsing panicked on a multi-byte last character. Clients
+  could not reach it (header values must be visible ASCII), but it broke
+  the no-panic rule.
+- Durations of 100,000 hours or more (valid GEP-2257, e.g.
+  `99991h83ms91h83ms`) printed in a form the parser rejects. The controller
+  serialises durations into snapshots, so such a timeout would have been
+  NACKed by every proxy.
+
+### Pod kills on kind (`PHASES="setup smoke chaos conformance" bench/exit/run-m4.sh`)
+
+A new kind cluster with the M5 chart: NetworkPolicies on, controller
+metrics, the extra RBAC rules. The fleet was scaled to three proxies
+(`drainDelaySeconds: 5`). A stdlib Go client outside the cluster sent a
+constant 500 req/s to the MetalLB address (`results/m5-k8s-*`).
+
+| Window | Pods killed | Requests | Failed | p50 / p99 / max |
+| --- | --- | --- | --- | --- |
+| Graceful (210 s) | proxy, leader controller, backend, proxy, proxy (one every 30-40 s) | 104,970 | **0** | 0.30 / 0.52 / 2,001 ms |
+| Forced (60 s, `--grace-period=0 --force`) | one proxy, no drain | 29,994 | **0** | 0.30 / 0.50 / 3.6 ms |
+
+The slowest graceful request (2.0 s) crossed a reconnect while a proxy
+drained. The forced kill dropped nothing, because the client's keep-alive
+connections to the killed pod were idle between requests and Go retries
+those. A kill during a long request would still fail that request.
+
+The same run passed the core conformance profiles again with
+NetworkPolicies active: GATEWAY-HTTP 36/36, GATEWAY-GRPC 14/14 (215
+sub-tests, 0 failures; `results/m4-conformance-core.*`, refreshed).
+
+### Alerting rules (`bench/exit/m5/alerts-test.sh`)
+
+`promtool check rules`: 9 rules. `promtool test rules`: every case passes
+(burn-rate windows, ejection share, scaled-to-zero clusters ignored,
+certificate expiry thresholds, proxy and controller rejections, a short
+disconnect not alerting, no ready controller).
+
+### Micro-benchmarks (`cargo bench -p ferry-bench`, Windows, i7-12700F)
+
+M5 touched the request path in three places: an atomic load per accept
+(connection cap), the tunnel relay (upgrades only) and a byte-wise
+`grpc-timeout` parser. None shows up.
+
+| Benchmark | M4 | M5 |
+| --- | --- | --- |
+| `lb/round_robin_pick_16` | 25.6 ns | 23.9 ns |
+| `lb/weighted_round_robin_pick_16` | 39.7 ns | 37.9 ns |
+| `lb/p2c_ewma_pick_16` | 76.1 ns | 72.3 ns |
+| `lb/maglev_pick_16` | 18.5 ns | 17.0 ns |
+| `lb/breaker_acquire_release` | 16.6 ns | 15.9 ns |
+| `edge/proxy_protocol_v1_parse` | 91.3 ns | 89.0 ns |
+| `edge/proxy_protocol_v2_parse` | 8.7 ns | 8.2 ns |
+| `router/100_routes_prefix_hit` | 48.2 ns | 44.3 ns |
+| `router/1000_routes_prefix_hit` | 48.9 ns | 44.4 ns |
+| `telemetry/route_record` | 13.7 ns | 13.1 ns |
+| `telemetry/access_log_line` | 671 ns | 646 ns |
+| `telemetry/spans_sampled` | 1.10 µs | 1.05 µs |
+| `telemetry/spans_unsampled` | 831 ns | 1.08 µs¹ |
+| `telemetry/scrape_100_routes` | 332 µs | 314 µs |
+| `config/parse_validate_100_routes` | 2.64 ms | 2.55 ms |
+| `controller/translate_1000_routes` | 8.49 ms | 8.03 ms |
+| `controller/snapshot_json_1000_routes` | 1.39 ms | 1.41 ms |
+
+Most numbers return to their M3 values. M4's were taken next to a busy kind
+cluster.
+
+¹ Unsampled spans read slower than sampled ones in this run, which cannot be
+right (unsampled does strictly less work). Tracing code did not change in
+M5, so this is read as noise and left for the Linux benchmark run.

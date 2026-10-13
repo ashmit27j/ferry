@@ -6,18 +6,20 @@ Ferry terminates TLS and proxies HTTP/1.1, HTTP/2, gRPC and WebSockets to backen
 pods. It is configured through the Kubernetes Gateway API and runs on AWS EKS
 behind a Network Load Balancer.
 
-> **Status: M4 (Kubernetes controller).** A Gateway API controller that
-> passes the core conformance suite for HTTPRoute and GRPCRoute (plus 19
-> extended HTTPRoute tests), provisions a
+> **Status: M5 (hardening) complete; next is M6, a production beta on EKS.**
+> A Gateway API controller that passes the core conformance suite for
+> HTTPRoute and GRPCRoute (plus 19 extended HTTPRoute tests), provisions a
 > proxy fleet per Gateway and streams validated snapshots to it over mutual
-> TLS; a `FerryPolicy` CRD and a Helm chart. Underneath: TLS termination (SNI, hot
-> certificate rotation) and upstream mTLS; HTTP/1.1, HTTP/2, gRPC and WebSocket
-> proxying; Gateway API matching and filters; five load-balancing policies;
-> health checks and outlier ejection; timeouts, budgeted retries, circuit
-> breakers and rate limits; PROXY protocol; request limits and HTTP/2 attack
-> defences; zero-drop rolling restarts; Prometheus metrics, OpenTelemetry
-> tracing, JSON access logs, an admin API and a Grafana dashboard. See
-> [`CLAUDE.md`](CLAUDE.md) for milestone status.
+> TLS; a `FerryPolicy` CRD; a Helm chart with alerting rules, runbooks and
+> NetworkPolicies. Underneath: TLS termination (SNI, hot certificate
+> rotation) and upstream mTLS; HTTP/1.1, HTTP/2, gRPC and WebSocket proxying;
+> Gateway API matching and filters; five load-balancing policies; health
+> checks and outlier ejection; timeouts, budgeted retries, circuit breakers,
+> rate limits and connection caps; PROXY protocol; request limits and HTTP/2
+> attack defences; zero-drop rolling restarts; Prometheus metrics,
+> OpenTelemetry tracing, JSON access logs, an admin API and a Grafana
+> dashboard. Every parser is fuzzed; releases are multi-arch, signed and
+> ship an SBOM. See [`CLAUDE.md`](CLAUDE.md) for milestone status.
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Helvetica Neue, Arial", "primaryColor": "#ffffff", "primaryTextColor": "#171717", "primaryBorderColor": "#dfdfdf", "lineColor": "#707070", "secondaryColor": "#fafafa", "tertiaryColor": "#ffffff"}}}%%
@@ -107,6 +109,27 @@ upstream attempt. The Grafana dashboard is
 SLOs first. [`deploy/observability`](deploy/observability/README.md) runs the
 whole stack (Prometheus, Grafana, OpenTelemetry Collector, Tempo) locally.
 
+## Operations and security
+
+- **Alerts.** The chart installs a PrometheusRule
+  ([`files/alerts.yaml`](deploy/helm/ferry/files/alerts.yaml)): SLO
+  burn-rate 5xx, ejected or missing backends, certificate expiry, rejected
+  configs, and a lost or down controller. Each alert links to a runbook in
+  [`docs/runbooks`](docs/runbooks/README.md).
+- **Security.** [`SECURITY.md`](SECURITY.md) covers reporting and release
+  verification; [`docs/security/threat-model.md`](docs/security/threat-model.md)
+  covers trust boundaries, mitigations and accepted risks.
+- **Releases.** Merging the release-please PR publishes
+  `ghcr.io/ashmit27j/ferry` (linux/amd64 and linux/arm64) and the Helm chart
+  as an OCI artifact, both signed with Cosign keyless signing, with an SPDX
+  SBOM and SLSA provenance.
+
+```sh
+cosign verify ghcr.io/ashmit27j/ferry:1.0.0 \
+  --certificate-identity https://github.com/ashmit27j/ferry/.github/workflows/release.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
 ## Repository layout
 
 | Path | What |
@@ -118,12 +141,13 @@ whole stack (Prometheus, Grafana, OpenTelemetry Collector, Tempo) locally.
 | `crates/ferry-controller` | Gateway API controller: translator, status, provisioning, snapshot server |
 | `crates/ferry-api` | Protobuf + gRPC for controller → proxy snapshots |
 | `crates/ferry-telemetry` | Metrics, tracing, access logs, logging |
-| `crates/ferry-testkit` | Mock HTTP/h2c/gRPC/WebSocket backends, trace client |
+| `crates/ferry-testkit` | Mock HTTP/h2c/gRPC/WebSocket backends, trace client, WebSocket flood |
 | `tests/` | In-process integration tests |
-| `fuzz/` | cargo-fuzz targets |
+| `fuzz/` | cargo-fuzz targets for every parser (six, nightly in CI) |
 | `bench/` | criterion, k6, exit tests, [results](bench/RESULTS.md) |
 | `deploy/` | Helm chart, Grafana dashboard, local observability stack |
-| `docs/adr/` | Architecture decision records |
+| `docs/adr/` | Architecture decision records (0001-0037) |
+| `docs/runbooks/`, `docs/security/` | Runbook per alert, threat model |
 
 ## Development
 

@@ -61,3 +61,34 @@ OpenTelemetry Collector, Tempo, Prometheus and Grafana on one Docker network,
 panel's query against Prometheus and follows each trace in Tempo; results go
 to `bench/exit/results/m3-*.json`. See
 [`deploy/observability`](../deploy/observability/README.md).
+
+`bench/exit/run-m4.sh` drives a kind cluster from a runner container (kind,
+kubectl, helm, the compiled Gateway API conformance suite): `FRESH=1`
+recreates the cluster, and `PHASES` picks from `setup smoke chaos
+conformance`. `chaos` (M5) scales the fleet to three proxies and keeps 500
+req/s flowing from outside the cluster while it deletes proxy, leader
+controller and backend pods, then force-kills one proxy in a separate
+window.
+
+## M5: soak, chaos and 10,000 WebSockets
+
+`bench/exit/run-m5.sh` runs Ferry (pinned with `cpuset`), three HTTP
+backends and a WebSocket backend in separate containers on a fixed subnet,
+with Prometheus scraping Ferry every 5 s. `ws-flood` holds `WS_COUNT`
+WebSockets for the whole run, sending a message on each every 30 s. k6 runs
+in 5-minute segments, because it keeps every sample in memory. Every 20
+minutes, `m5/chaos.sh` kills and restarts a backend, adds 200 ms of netem
+latency to another, and then 5% packet loss to a third. `m5/m5-check.py`
+then checks the SLOs and fits a line through resident memory and open file
+descriptors after warm-up.
+
+```sh
+# The gate soak, on a dedicated Linux host (Docker; no WSL2 in the path):
+DURATION=4h RATE=10000 FERRY_CPUSET=0 WS_COUNT=10000 bench/exit/run-m5.sh
+# A 72-hour run is the same with DURATION=72h. A dry run:
+DURATION=10m RATE=2000 WS_COUNT=2000 bench/exit/run-m5.sh
+```
+
+`bench/exit/m5/fuzz.sh` fuzzes every target in a nightly container (any
+host), and `bench/exit/m5/alerts-test.sh` runs promtool on the alerting
+rules.

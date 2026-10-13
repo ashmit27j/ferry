@@ -124,3 +124,4 @@ under **residual risks**, with an owner milestone.
 | Date | Change | Findings |
 | --- | --- | --- |
 | 2026-10-13 | First full model (M5) | Added NetworkPolicies (B5), `max_connections` and `tunnel_idle` (B1), fuzz targets for every parser (B1, B3); R1–R6 accepted |
+| 2026-10-13 | M5 fuzzing and chaos | Fuzzing found a panic in `grpc-timeout` parsing (not reachable from clients) and durations that printed unparsably (would NACK snapshots); both fixed. Open tunnels escaped `max_connections`; fixed. Pod kills on kind dropped no requests. No open high-severity findings |

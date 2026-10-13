@@ -235,48 +235,45 @@ reload: plan listener slots (keep / rename / bind new / retire) ▶ prepare ▶ 
 | M2 TLS and resilience | Approved 2026-10-13 |
 | M3 Observability and admin | Approved 2026-10-13 |
 | M4 Kubernetes controller | Approved 2026-10-13 |
-| **M5 Hardening** | In progress |
+| **M5 Hardening** | Complete except the long soak (deferred to a Linux host), awaiting gate approval |
 | M6 Production beta | Not started |
 
-### Known gaps carried out of M4
+### Deferred out of M5 (the plan owner's call)
+
+- **The long soak** runs on a Linux host, not the WSL2 dev box: `DURATION=4h`
+  (or 72h) `RATE=10000 FERRY_CPUSET=0 bench/exit/run-m5.sh`. A 30-minute
+  partial run passed every SLO (bench/RESULTS.md, M5); flat memory still
+  needs the long run. The M6 staging run (48 h) and production week cover
+  the 72-hour requirement.
+- **p99 latency** end to end is still unproven off the WSL2 VM. Ferry's own
+  histogram reads p50 13 µs / p99 25 µs at 10k req/s on one core.
+
+### Known gaps (current)
 
 - Snapshot-stream certificates are read at start: after certgen renews them
-  (`helm upgrade` within 90 days of expiry), restart controller and proxies.
-  All proxies share one client identity (ADR 0033).
+  (`helm upgrade` within 90 days of expiry), restart controller and proxies
+  (threat model R4). All proxies share one client identity, so a
+  compromised proxy can fetch any Gateway's snapshot (R1, planned for M6).
+- The controller can read every Secret (RBAC cannot select by type; R2).
 - No Gateway listener isolation (`GatewayHTTPListenerIsolation`), ListenerSet,
   BackendTLSPolicy, RequestMirror, CORS, GEP-1731 HTTPRoute retries (use
   FerryPolicy `retry`), static Gateway addresses, `parametersRef` or
   per-Gateway infrastructure overrides.
-- The controller has no Prometheus metrics yet (logs and `/debug/proxies`
-  only); proxies expose no "controller connected" gauge (M5 alert).
-- Conformance runs on kind with MetalLB; EKS with the AWS Load Balancer
-  Controller and PROXY v2 is untested until M6 staging.
-- Rate-limit splitting assumes an even spread of clients across replicas.
-
-### Known gaps carried out of M3
-
-- Added latency from Ferry's own histogram is p50 13 µs / p99 45 µs (exit
-  run), but end-to-end p99 from k6 is still unproven off the WSL2 VM (see
-  bench/RESULTS.md); measured on the Linux deployment target.
-- No alerting rules or runbooks yet (M5); no certificate-expiry metric yet
-  (needs X.509 parsing; M5 alert).
-- Ferry's diagnostic logs carry no trace ID (access-log lines do). OTLP export
-  is plaintext gRPC only.
-- `edge/proxy_protocol_v1_parse` benchmarks 3.7× slower than in M2 with no
-  code change; unexplained, still < 0.1 µs per connection.
-- Docker Desktop is needed for run-m1.sh/run-m3.sh on Windows; the Chrome
-  extension was not connected, so the gate has no dashboard screenshot.
-
-### Known gaps carried out of M2
-
-- **p99 latency is unproven** (WSL2 loopback artefacts; see bench/RESULTS.md).
-  The plan owner deferred latency to the Linux deployment target.
+- Conformance and pod-kill chaos run on kind with MetalLB; EKS with the AWS
+  Load Balancer Controller and PROXY v2 is untested until M6 staging.
+- Rate-limit splitting and connection caps assume an even spread of clients
+  across replicas.
 - CL+TE requests are decoded by Transfer-Encoding and the connection closed,
   not answered 400 (hyper does not expose the conflict; ADR 0016).
-- Upstream client certificates and CAs rotate on config change, not by polling
-  files (listener certificates do poll; ADR 0024).
-- WebSockets over HTTP/2 (RFC 8441) and upgrades to h2 clusters are unsupported
-  (ADR 0025). Upgraded tunnels have no idle timeout.
-- `max_connections` fails fast instead of queueing (ADR 0020).
-- GitHub Actions are pinned by major tag, not commit SHA; pin SHAs before the repo
-  goes public (M5). Dependabot PRs for action bumps are open.
+- Upstream client certificates and CAs rotate on config change, not by
+  polling files (listener certificates do poll; ADR 0024).
+- WebSockets over HTTP/2 (RFC 8441) and upgrades to h2 clusters are
+  unsupported (ADR 0025). Clusters that carry many WebSockets need circuit
+  breakers above their peak tunnel count (ADR 0037).
+- Upstream `max_connections` fails fast instead of queueing (ADR 0020).
+- Ferry's diagnostic logs carry no trace ID (access-log lines do). OTLP
+  export is plaintext gRPC only.
+- `edge/proxy_protocol_v1_parse` benchmarks slower than in M2 with no code
+  change; unexplained, still < 0.1 µs per connection.
+- Repo settings: release-please needs "Allow GitHub Actions to create pull
+  requests". Dependabot PRs bump the SHA-pinned actions to new majors.
