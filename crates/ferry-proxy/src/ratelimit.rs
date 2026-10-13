@@ -63,6 +63,11 @@ impl RateLimiter {
 
     /// Checks one request.
     pub(crate) fn check(&self, client: IpAddr, headers: &HeaderMap) -> Result<(), Limited> {
+        self.check_slot(self.slot(client, headers), now_ns())
+    }
+
+    /// The slot a request's key hashes to.
+    fn slot(&self, client: IpAddr, headers: &HeaderMap) -> usize {
         let mut h = self.hasher.build_hasher();
         match self.config.key() {
             RateLimitKey::Header(name) => {
@@ -70,8 +75,7 @@ impl RateLimiter {
             }
             _ => client.hash(&mut h),
         }
-        let slot = usize::try_from(h.finish() % SLOTS as u64).unwrap_or(0);
-        self.check_slot(slot, now_ns())
+        usize::try_from(h.finish() % SLOTS as u64).unwrap_or(0)
     }
 
     fn check_slot(&self, slot: usize, now: u64) -> Result<(), Limited> {
@@ -150,20 +154,31 @@ mod tests {
 
     #[test]
     fn keys_by_ip_or_header() {
+        // The seed is random, so two fixed keys share a slot one run in
+        // 4,096: pick ones that do not.
         let ip = limiter("{ requests: 1, per: 1m }");
-        let a: IpAddr = "10.0.0.1".parse().unwrap();
-        let b: IpAddr = "10.0.0.2".parse().unwrap();
         let empty = HeaderMap::new();
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        let b = (2..=9)
+            .map(|i| IpAddr::from([10, 0, 0, i]))
+            .find(|&b| ip.slot(b, &empty) != ip.slot(a, &empty))
+            .unwrap();
         assert!(ip.check(a, &empty).is_ok());
         assert!(ip.check(a, &empty).is_err());
-        // Overwhelmingly likely to be a different slot.
         assert!(ip.check(b, &empty).is_ok());
 
         let hdr = limiter("{ requests: 1, per: 1m, key: { header: x-api-key } }");
-        let mut k1 = HeaderMap::new();
-        k1.insert("x-api-key", "one".parse().unwrap());
-        let mut k2 = HeaderMap::new();
-        k2.insert("x-api-key", "two".parse().unwrap());
+        let key = |v: &str| {
+            let mut m = HeaderMap::new();
+            m.insert("x-api-key", v.parse().unwrap());
+            m
+        };
+        let k1 = key("one");
+        let k2 = ["two", "three", "four", "five"]
+            .map(key)
+            .into_iter()
+            .find(|k2| hdr.slot(a, k2) != hdr.slot(a, &k1))
+            .unwrap();
         assert!(hdr.check(a, &k1).is_ok());
         assert!(hdr.check(b, &k1).is_err(), "same key, different IP");
         assert!(hdr.check(a, &k2).is_ok());

@@ -65,13 +65,19 @@ async fn header_keys_get_separate_buckets() {
     .await;
     let addr = proxy.addr;
     let with_key =
-        |k: &'static str| async move { send(addr, "/", &[("x-api-key", k)], false).await };
-    assert_eq!(with_key("alpha").await.status, 200);
-    assert_eq!(with_key("alpha").await.status, 429);
-    assert_eq!(with_key("beta").await.status, 200);
+        |k: String| async move { send(addr, "/", &[("x-api-key", k.as_str())], false).await };
+    // Keys hash into 4,096 slots with a random seed, so two keys share a
+    // bucket now and then (ADR 0022). Ten fresh keys plus "no header": all
+    // admitted bar the rare collision, never one key twice.
+    let mut admitted = 0;
+    for i in 0..10 {
+        admitted += usize::from(with_key(format!("key-{i}")).await.status == 200);
+    }
+    admitted += usize::from(get(addr, "/").await.status == 200);
+    assert!(admitted >= 9, "only {admitted} of 11 keys admitted");
+    assert_eq!(with_key("key-0".into()).await.status, 429);
     // Requests without the header share one bucket.
-    assert_eq!(get(proxy.addr, "/").await.status, 200);
-    assert_eq!(get(proxy.addr, "/").await.status, 429);
+    assert_eq!(get(addr, "/").await.status, 429);
 }
 
 #[tokio::test]
