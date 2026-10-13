@@ -1,13 +1,18 @@
 //! Listeners, connection serving, hot swap and graceful drain.
 
+use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use ferry_config::{Listener, Snapshot, SnapshotVersion};
 use ferry_lb::pool::{PoolSet, PoolSettings};
+use http::header::{self, HeaderValue};
+use http::{Request, StatusCode, Version};
+use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
@@ -27,6 +32,26 @@ use crate::tls::HANDSHAKE_TIMEOUT;
 /// How long a draining proxy waits for in-flight requests before closing connections.
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Shutdown timing; see [`Proxy::run`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Drain {
+    /// How long to keep accepting, with `Connection: close` on every HTTP/1.1
+    /// response, before closing the listeners. Should cover the load
+    /// balancer's deregistration delay.
+    pub delay: Duration,
+    /// How long to wait for in-flight requests once the listeners close.
+    pub timeout: Duration,
+}
+
+impl Default for Drain {
+    fn default() -> Self {
+        Self {
+            delay: Duration::ZERO,
+            timeout: DEFAULT_DRAIN_TIMEOUT,
+        }
+    }
+}
+
 /// How often certificate files of TLS listeners are re-read.
 const CERT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -40,6 +65,8 @@ const POOL_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
 #[derive(Debug)]
 struct Shared {
     runtime: ArcSwap<Runtime>,
+    /// Set when shutdown starts: HTTP/1.1 responses then carry `Connection: close`.
+    draining: AtomicBool,
     /// Serialises reloads with health-driven host-set rebuilds.
     control: Mutex<Control>,
     pools: PoolSet<UpstreamBody>,
@@ -157,6 +184,7 @@ impl Proxy {
             let runtime = control.build(snapshot, None, &bound, &pools, weak, &prepared);
             Shared {
                 runtime: ArcSwap::from_pointee(runtime),
+                draining: AtomicBool::new(false),
                 control: Mutex::new(control),
                 pools,
                 bound,
@@ -181,11 +209,15 @@ impl Proxy {
         }
     }
 
-    /// Serves until `shutdown` resolves, then drains.
+    /// Serves until `shutdown` resolves, then drains in two stages (ADR 0026).
     ///
-    /// Draining stops accepting, tells HTTP/1.1 clients to close after their
-    /// current response and sends HTTP/2 GOAWAY, then waits up to
-    /// `drain_timeout` for in-flight requests before dropping what remains.
+    /// 1. For `drain.delay`, keep accepting while load balancers deregister
+    ///    this instance, but end every HTTP/1.1 response with
+    ///    `Connection: close` so clients move elsewhere one request at a time.
+    /// 2. Stop accepting, send HTTP/2 GOAWAY and close idle HTTP/1.1
+    ///    connections, and wait up to `drain.timeout` for in-flight requests
+    ///    before dropping what remains.
+    ///
     /// Health checkers stop once draining finishes.
     ///
     /// # Errors
@@ -195,8 +227,9 @@ impl Proxy {
     pub async fn run(
         self,
         shutdown: impl Future<Output = ()> + Send,
-        drain_timeout: Duration,
+        drain: Drain,
     ) -> Result<(), ProxyError> {
+        let drain_timeout = drain.timeout;
         let token = CancellationToken::new();
         let mut tasks = JoinSet::new();
         for (index, addr, tcp) in self.listeners {
@@ -211,7 +244,15 @@ impl Proxy {
         }
         let sweeper = tokio::spawn(maintenance(Arc::downgrade(&self.shared), token.clone()));
         shutdown.await;
-        info!(?drain_timeout, "shutdown requested; draining");
+        self.shared.draining.store(true, Ordering::Relaxed);
+        if !drain.delay.is_zero() {
+            info!(delay = ?drain.delay, "shutdown requested; closing client connections as they finish");
+            tokio::time::sleep(drain.delay).await;
+        }
+        info!(
+            ?drain_timeout,
+            "no longer accepting; draining in-flight requests"
+        );
         token.cancel();
         while let Some(res) = tasks.join_next().await {
             if let Err(e) = res {
@@ -240,6 +281,12 @@ impl ReloadHandle {
         self.shared.install(snapshot)?;
         info!(%version, "snapshot swapped");
         Ok(())
+    }
+
+    /// Whether shutdown has started.
+    #[must_use]
+    pub fn is_draining(&self) -> bool {
+        self.shared.draining.load(Ordering::Relaxed)
     }
 
     /// Version of the snapshot currently serving new requests.
@@ -426,10 +473,22 @@ fn serve(
                 }
             }
         }
-        let service = service_fn(move |req| {
+        let service = service_fn(move |req: Request<Incoming>| {
             // One load per request: the request keeps this snapshot until it completes.
             let runtime = shared.runtime.load_full();
-            handle(runtime, from, req)
+            let shared = Arc::clone(&shared);
+            let http1 = req.version() < Version::HTTP_2;
+            async move {
+                let mut resp = handle(runtime, from, req).await?;
+                if http1
+                    && shared.draining.load(Ordering::Relaxed)
+                    && resp.status() != StatusCode::SWITCHING_PROTOCOLS
+                {
+                    resp.headers_mut()
+                        .insert(header::CONNECTION, HeaderValue::from_static("close"));
+                }
+                Ok::<_, Infallible>(resp)
+            }
         });
         let result = match tls {
             None => {

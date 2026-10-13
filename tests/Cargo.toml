@@ -59,6 +59,10 @@ path = "it/upstream_tls.rs"
 name = "websocket"
 path = "it/websocket.rs"
 
+[[test]]
+name = "drain"
+path = "it/drain.rs"
+
 [dependencies]
 bytes.workspace = true
 ferry-config.workspace = true

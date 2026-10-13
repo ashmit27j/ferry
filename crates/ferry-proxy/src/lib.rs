@@ -28,4 +28,4 @@ pub use body::ProxyBody;
 pub use error::ProxyError;
 pub use forward::MAX_ATTEMPTS;
 pub use router::Router;
-pub use server::{DEFAULT_DRAIN_TIMEOUT, Proxy, ReloadHandle};
+pub use server::{DEFAULT_DRAIN_TIMEOUT, Drain, Proxy, ReloadHandle};

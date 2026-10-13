@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use ferry_config::{Snapshot, SnapshotVersion};
-use ferry_proxy::{Proxy, ProxyError, ReloadHandle};
+use ferry_proxy::{Drain, Proxy, ProxyError, ReloadHandle};
 use http::{HeaderMap, Request, StatusCode};
 use http_body_util::{BodyExt, Empty, Full};
 use hyper_util::client::legacy::Client;
@@ -72,7 +72,19 @@ impl TestProxy {
     }
 
     /// Like [`TestProxy::start`] with a custom drain timeout.
-    pub async fn start_with_drain(yaml: &str, drain: Duration) -> Self {
+    pub async fn start_with_drain(yaml: &str, timeout: Duration) -> Self {
+        Self::start_with(
+            yaml,
+            Drain {
+                delay: Duration::ZERO,
+                timeout,
+            },
+        )
+        .await
+    }
+
+    /// Like [`TestProxy::start`] with full drain settings.
+    pub async fn start_with(yaml: &str, drain: Drain) -> Self {
         let proxy = Proxy::bind(snapshot(yaml, 1)).await.expect("proxy binds");
         let addr = proxy.local_addrs()[0];
         let reload = proxy.reload_handle();
@@ -295,5 +307,65 @@ pub async fn eventually(timeout: Duration, mut cond: impl FnMut() -> bool) {
             "condition not met within {timeout:?}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// A layer-4 load balancer for tests, standing in for an NLB: each new TCP
+/// connection goes to the next registered target, round robin. Deregistering
+/// a target only affects new connections, as with a real NLB.
+#[derive(Debug)]
+pub struct TcpBalancer {
+    /// Address clients connect to.
+    pub addr: SocketAddr,
+    targets: Arc<std::sync::Mutex<Vec<SocketAddr>>>,
+    task: JoinHandle<()>,
+}
+
+impl TcpBalancer {
+    /// Starts balancing across `targets`.
+    pub async fn start(targets: Vec<SocketAddr>) -> Self {
+        let listener = tokio::net::TcpListener::bind(any_port()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let targets = Arc::new(std::sync::Mutex::new(targets));
+        let shared = Arc::clone(&targets);
+        let task = tokio::spawn(async move {
+            let mut next = 0usize;
+            loop {
+                let Ok((mut client, _)) = listener.accept().await else {
+                    continue;
+                };
+                let target = {
+                    let t = shared.lock().unwrap();
+                    if t.is_empty() {
+                        continue;
+                    }
+                    next = next.wrapping_add(1);
+                    t[next % t.len()]
+                };
+                tokio::spawn(async move {
+                    let _ = client.set_nodelay(true);
+                    if let Ok(mut upstream) = tokio::net::TcpStream::connect(target).await {
+                        let _ = upstream.set_nodelay(true);
+                        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                    }
+                });
+            }
+        });
+        Self {
+            addr,
+            targets,
+            task,
+        }
+    }
+
+    /// Replaces the targets for new connections.
+    pub fn set_targets(&self, targets: Vec<SocketAddr>) {
+        *self.targets.lock().unwrap() = targets;
+    }
+}
+
+impl Drop for TcpBalancer {
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }

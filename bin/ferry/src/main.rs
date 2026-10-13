@@ -41,6 +41,11 @@ enum Command {
         /// Seconds to wait for in-flight requests on shutdown.
         #[arg(long, default_value_t = ferry_proxy::DEFAULT_DRAIN_TIMEOUT.as_secs())]
         drain_timeout_secs: u64,
+        /// Seconds to keep accepting after SIGTERM, closing client connections
+        /// as their requests finish, before the listeners close. Set it to
+        /// cover the load balancer's deregistration delay (the Helm chart does).
+        #[arg(long, default_value_t = 0)]
+        drain_delay_secs: u64,
         /// Milliseconds between checks of the config file for changes; 0
         /// disables hot reload.
         #[arg(long, default_value_t = 1000)]
@@ -80,6 +85,7 @@ fn run(command: Command) -> anyhow::Result<ExitCode> {
         Command::Proxy {
             config,
             drain_timeout_secs,
+            drain_delay_secs,
             watch_interval_ms,
         } => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -88,7 +94,10 @@ fn run(command: Command) -> anyhow::Result<ExitCode> {
                 .context("building tokio runtime")?;
             runtime.block_on(proxy(
                 config,
-                Duration::from_secs(drain_timeout_secs),
+                ferry_proxy::Drain {
+                    delay: Duration::from_secs(drain_delay_secs),
+                    timeout: Duration::from_secs(drain_timeout_secs),
+                },
                 Duration::from_millis(watch_interval_ms),
             ))?;
             Ok(ExitCode::SUCCESS)
@@ -104,7 +113,7 @@ fn run(command: Command) -> anyhow::Result<ExitCode> {
     }
 }
 
-async fn proxy(config: PathBuf, drain_timeout: Duration, watch: Duration) -> anyhow::Result<()> {
+async fn proxy(config: PathBuf, drain: ferry_proxy::Drain, watch: Duration) -> anyhow::Result<()> {
     let snapshot = ferry_config::load_snapshot(&config, SnapshotVersion(1))
         .with_context(|| format!("loading {}", config.display()))?;
     info!(config = %config.display(), version = %snapshot.version(), "config loaded");
@@ -118,7 +127,7 @@ async fn proxy(config: PathBuf, drain_timeout: Duration, watch: Duration) -> any
             stop_watching.clone(),
         ));
     }
-    let result = proxy.run(shutdown_signal(), drain_timeout).await;
+    let result = proxy.run(shutdown_signal(), drain).await;
     stop_watching.cancel();
     result?;
     Ok(())
