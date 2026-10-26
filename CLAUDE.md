@@ -275,5 +275,4 @@ reload: plan listener slots (keep / rename / bind new / retire) ▶ prepare ▶ 
   export is plaintext gRPC only.
 - `edge/proxy_protocol_v1_parse` benchmarks slower than in M2 with no code
   change; unexplained, still < 0.1 µs per connection.
-- Repo settings: release-please needs "Allow GitHub Actions to create pull
-  requests". Dependabot PRs bump the SHA-pinned actions to new majors.
+- Dependabot PRs bump the SHA-pinned actions to new majors.

@@ -36,7 +36,7 @@
           "legend": "req/s per core",
           "series": 1,
           "values": [
-            7265.564424
+            7736.180308
           ]
         }
       ],
@@ -78,7 +78,7 @@
           "legend": "per hour",
           "series": 1,
           "values": [
-            -7078302.266841
+            19607787.035358
           ]
         }
       ],
@@ -99,7 +99,7 @@
           "legend": "p90",
           "series": 1,
           "values": [
-            2.4e-05
+            2.3e-05
           ]
         },
         {
@@ -113,7 +113,7 @@
           "legend": "p99.9",
           "series": 1,
           "values": [
-            6e-05
+            8.6e-05
           ]
         }
       ],
@@ -127,7 +127,7 @@
           "legend": "reloads / min",
           "series": 1,
           "values": [
-            12.000873
+            11.9976
           ]
         },
         {
@@ -169,7 +169,7 @@
           "legend": "{{instance}}",
           "series": 1,
           "values": [
-            31453184.0
+            33878016.0
           ]
         }
       ],
@@ -184,7 +184,7 @@
           "series": 3,
           "values": [
             0.0,
-            1158.611535,
+            1185.508353,
             0.0
           ]
         }
@@ -232,7 +232,7 @@
           "series": 5,
           "values": [
             0.0,
-            1158.611535,
+            1185.508353,
             0.0,
             0.0,
             0.0
@@ -273,7 +273,7 @@
           "legend": "{{cluster}}",
           "series": 1,
           "values": [
-            1158.611535
+            1185.508353
           ]
         }
       ],
@@ -427,7 +427,7 @@
           "legend": "{{cluster}} {{breaker}} used",
           "series": 4,
           "values": [
-            0.048828,
+            0.038086,
             0.0,
             0.0,
             0.0
@@ -449,14 +449,14 @@
           "legend": "{{cluster}} idle pooled",
           "series": 1,
           "values": [
-            50.0
+            39.0
           ]
         },
         {
           "legend": "{{cluster}} open",
           "series": 1,
           "values": [
-            50.0
+            39.0
           ]
         },
         {
@@ -484,7 +484,7 @@
           "legend": "{{listener}} new / s",
           "series": 1,
           "values": [
-            0.018183
+            0.018178
           ]
         }
       ],
@@ -526,7 +526,7 @@
           "legend": "{{instance}} seconds since load",
           "series": 1,
           "values": [
-            4.798
+            8.357
           ]
         },
         {
@@ -545,11 +545,40 @@
         }
       ],
       "has_data": true
+    },
+    {
+      "section": "Proxy",
+      "title": "Certificate expiry",
+      "targets": [
+        {
+          "legend": "{{kind}} {{owner}} {{name}}",
+          "series": 0,
+          "values": []
+        }
+      ],
+      "has_data": false
+    },
+    {
+      "section": "Proxy",
+      "title": "Controller link",
+      "targets": [
+        {
+          "legend": "connected",
+          "series": 0,
+          "values": []
+        },
+        {
+          "legend": "following",
+          "series": 0,
+          "values": []
+        }
+      ],
+      "has_data": false
     }
   ],
   "traces": [
     {
-      "trace_id": "a99c3d87217eb8a822e872508bdbe6ab",
+      "trace_id": "6075619fc72025443f46773a411b7ac0",
       "spans": 4,
       "services": [
         "ferry",
@@ -567,7 +596,7 @@
       "client_ferry_backend": true
     },
     {
-      "trace_id": "971260d9888f872e85fccae2e10ee886",
+      "trace_id": "eb014c2954c96065f493a77a5f85be72",
       "spans": 4,
       "services": [
         "ferry",
@@ -585,7 +614,7 @@
       "client_ferry_backend": true
     },
     {
-      "trace_id": "4376a49db7fa32f3d111e27cc4b92be6",
+      "trace_id": "8b86970d983fe3d69c8cb6801cdad624",
       "spans": 4,
       "services": [
         "ferry",

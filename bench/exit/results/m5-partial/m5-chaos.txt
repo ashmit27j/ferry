@@ -14,3 +14,33 @@ Error response from daemon: cannot kill container: m5-be-c: No such container: m
 Error response from daemon: No such container: m5-be-c
 failed to start containers: m5-be-c
 1791906106 latency-on m5-be-b
+1791906407 loss-on m5-be-a
+1791907008 kill m5-be-c
+Error response from daemon: cannot kill container: m5-be-c: No such container: m5-be-c
+Error response from daemon: No such container: m5-be-c
+failed to start containers: m5-be-c
+1791907313 latency-on m5-be-b
+1791907614 loss-on m5-be-a
+1791908214 kill m5-be-c
+Error response from daemon: cannot kill container: m5-be-c: No such container: m5-be-c
+Error response from daemon: No such container: m5-be-c
+failed to start containers: m5-be-c
+1791908518 latency-on m5-be-b
+1791908819 loss-on m5-be-a
+1791909419 kill m5-be-c
+Error response from daemon: cannot kill container: m5-be-c: No such container: m5-be-c
+Error response from daemon: No such container: m5-be-c
+failed to start containers: m5-be-c
+1791909723 latency-on m5-be-b
+1791910024 loss-on m5-be-a
+1791910625 kill m5-be-c
+Error response from daemon: cannot kill container: m5-be-c: No such container: m5-be-c
+Error response from daemon: No such container: m5-be-c
+failed to start containers: m5-be-c
+1791910928 latency-on m5-be-b
+1791911229 loss-on m5-be-a
+1791911830 kill m5-be-c
+Error response from daemon: cannot kill container: m5-be-c: No such container: m5-be-c
+Error response from daemon: No such container: m5-be-c
+failed to start containers: m5-be-c
+1791912134 latency-on m5-be-b
