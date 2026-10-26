@@ -1,0 +1,7 @@
+# The release image from a binary already built for linux/amd64 (the
+# `ferry-target` volume, see bench/README.md), so up.sh does not compile
+# twice. The top-level Dockerfile remains the release build.
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY ferry /usr/local/bin/ferry
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/ferry"]

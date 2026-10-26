@@ -1,0 +1,14 @@
+# Overrides for EKS staging (deploy/eks/up.sh). The chart defaults already
+# target an NLB with IP targets and PROXY v2; this adds a Gateway, access
+# logs, and the label kube-prometheus-stack selects rules by. up.sh sets
+# image.repository and image.tag to the ECR image it pushed.
+gateway:
+  create: true
+
+proxy:
+  accessLog: stdout
+
+metrics:
+  prometheusRule:
+    labels:
+      release: kube-prometheus-stack

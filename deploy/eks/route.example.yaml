@@ -1,0 +1,17 @@
+# Routes real traffic through Ferry to a Service of yours. Replace the
+# namespace, Service name and port, then: kubectl apply -f route.example.yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: app
+  namespace: default
+spec:
+  parentRefs:
+    - name: ferry
+      namespace: ferry-system
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: / }
+      backendRefs:
+        - name: my-service
+          port: 80

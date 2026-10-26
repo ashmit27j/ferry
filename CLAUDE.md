@@ -28,6 +28,7 @@ bench/exit/run-m1.sh                          # M1 exit test in Docker (see benc
 bench/exit/run-m3.sh                          # M3 exit: Prometheus/Grafana/Tempo stack, SLO + trace checks
 FRESH=1 bench/exit/run-m4.sh                  # M4 exit: new kind cluster + MetalLB, helm install, smoke, conformance
 EXTENDED=1 PHASES=conformance bench/exit/run-m4.sh   # conformance with the extended features claimed
+CLUSTER=ferry-staging REGION=us-east-1 deploy/eks/up.sh   # EKS: eksctl cluster, LB controller, monitoring, ECR image, chart
 DURATION=4h bench/exit/run-m5.sh              # M5 exit: soak + chaos + 10k WebSockets, SLO and memory checks
 bench/exit/m5/alerts-test.sh                  # promtool check + unit tests of the alerting rules
 cargo bench -p ferry-bench --bench controller # translation and snapshot serialisation
