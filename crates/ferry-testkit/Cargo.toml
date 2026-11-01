@@ -38,7 +38,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "rt-multi-thread", "time", "macros", "sync", "signal"] }
 tokio-stream = { workspace = true, features = ["net"] }
-tokio-tungstenite.workspace = true
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
 tokio-util.workspace = true
 tonic = { workspace = true, features = ["router", "server", "transport"] }
 tonic-prost.workspace = true

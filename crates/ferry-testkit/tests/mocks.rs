@@ -220,3 +220,29 @@ async fn websocket_error_injection_closes_with_1011() {
         other => panic!("expected close frame, got {other:?}"),
     }
 }
+
+// Regression: ws-flood could not open wss:// URLs (the free version's
+// WebSocket demo) because tokio-tungstenite was built without TLS.
+#[tokio::test]
+async fn websocket_client_supports_wss() {
+    // Accept and hang up: the TLS step is reached, and fails, either way.
+    let listener = tokio::net::TcpListener::bind(any_port()).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            drop(stream);
+        }
+    });
+    let err = tokio_tungstenite::connect_async(format!("wss://{addr}/"))
+        .await
+        .unwrap_err();
+    assert!(
+        !matches!(
+            err,
+            tokio_tungstenite::tungstenite::Error::Url(
+                tokio_tungstenite::tungstenite::error::UrlError::TlsFeatureNotEnabled
+            )
+        ),
+        "wss:// needs a TLS feature on tokio-tungstenite: {err}"
+    );
+}
