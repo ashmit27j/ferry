@@ -52,6 +52,33 @@ async fn http1_echoes_request() {
 }
 
 #[tokio::test]
+async fn page_is_served_instead_of_the_echo() {
+    let mock = mock_http::spawn(any_port(), Behavior::named("site").with_page("<h1>hi</h1>"))
+        .await
+        .unwrap();
+    let client = Client::builder(TokioExecutor::new()).build_http::<Empty<Bytes>>();
+    let resp = client
+        .get(format!("http://{}/", mock.addr()).parse().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["content-type"], "text/html; charset=utf-8");
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"<h1>hi</h1>");
+    // Health checks still see /healthz.
+    let health = client
+        .get(format!("http://{}/healthz", mock.addr()).parse().unwrap())
+        .await
+        .unwrap()
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    assert_eq!(&health[..], b"ok");
+}
+
+#[tokio::test]
 async fn h2c_prior_knowledge_is_served() {
     let mock = mock_http::spawn(any_port(), Behavior::named("b"))
         .await
