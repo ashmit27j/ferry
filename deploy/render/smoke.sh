@@ -19,7 +19,7 @@ curl -s -m 120 -o /dev/null "$URL/healthz" || true # wake it up
 
 check "/healthz is 200" "$([ "$(status "$URL/healthz")" = 200 ] && echo 1)"
 check "/ serves the landing page" \
-    "$(curl -s -m 20 "$URL/" | grep -q '<title>Ferry, free version</title>' && echo 1)"
+    "$(curl -s -m 20 "$URL/" | grep -q '<title>Ferry Live Demo</title>' && echo 1)"
 check "x-ferry-edition: free" \
     "$(curl -s -m 20 -o /dev/null -D - "$URL/hello" | grep -qi '^x-ferry-edition: free' && echo 1)"
 
