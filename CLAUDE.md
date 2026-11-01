@@ -7,8 +7,10 @@ every milestone.
 
 A Kubernetes-native L7 load balancer and API gateway in Rust: TLS termination,
 HTTP/1.1, HTTP/2, gRPC and WebSocket proxying, configured by the Gateway API,
-running on EKS behind an NLB. The full plan, milestones and SLOs live in the
-master prompt; decisions live in `docs/adr/`.
+built to run on Kubernetes behind a cloud load balancer. The full plan,
+milestones and SLOs live in the master prompt; decisions live in `docs/adr/`.
+Paid hosting is out of scope (2026-11-01): the public deployment is the
+**free version** on Render's free tier (ADR 0038, `docs/free-version.md`).
 
 ## Commands
 
@@ -35,6 +37,7 @@ cargo bench -p ferry-bench --bench controller # translation and snapshot seriali
 python crates/ferry-controller/gen/gateway_api.py v1.6.3 --crds   # regenerate Gateway API types + chart CRDs
 cargo run -p ferry -- crds > deploy/helm/ferry/crds/ferrypolicies.yaml  # after changing FerryPolicy (a test checks)
 docker build -t ferry:dev .                   # distroless image: proxy, controller, certgen
+docker build -f deploy/render/Dockerfile -t ferry-free .   # free version: Ferry + mock backends, port 10000
 python deploy/grafana/generate.py deploy/grafana/ferry-dashboard.json   # then: cargo nextest run --test dashboard
 
 cargo run -p ferry -- proxy --config examples/hello.yaml       # reloads the file on change
@@ -194,6 +197,10 @@ reload: plan listener slots (keep / rename / bind new / retire) ▶ prepare ▶ 
   HTTP/2 attacks, gRPC interop, TLS/mTLS, drain and rolling restart;
   `TestProxy::start_with_telemetry`, `serve_admin`, `metrics_text`, `metric`;
   `tracing.rs` runs an OTLP collector in-process; `dashboard.rs`, `alerts.rs`.
+- Free version (ADR 0038): `render.yaml` (Render Blueprint, autodeploys
+  `main`), `deploy/render/{Dockerfile,start.sh,ferry.yaml}`. Changing the
+  demo config redeploys the public URL; keep `docs/free-version.md` (the
+  free-vs-production table) in step. A CLI test validates the config.
 - `deploy/grafana/` (dashboard + generator, ADR 0031), `deploy/observability/`
   (collector, Tempo, Prometheus, Grafana provisioning for run-m3.sh).
 
@@ -236,16 +243,15 @@ reload: plan listener slots (keep / rename / bind new / retire) ▶ prepare ▶ 
 | M2 TLS and resilience | Approved 2026-10-13 |
 | M3 Observability and admin | Approved 2026-10-13 |
 | M4 Kubernetes controller | Approved 2026-10-13 |
-| **M5 Hardening** | Complete except the long soak (deferred to a Linux host), awaiting gate approval |
-| M6 Production beta | Not started |
+| M5 Hardening | Approved 2026-11-01, long soak waived |
+| **M6 Free public demo** | In progress: Render free tier (ADR 0038); replaces the paid EKS beta |
 
-### Deferred out of M5 (the plan owner's call)
+### Waived or dropped (the plan owner's call, 2026-11-01)
 
-- **The long soak** runs on a Linux host, not the WSL2 dev box: `DURATION=4h`
-  (or 72h) `RATE=10000 FERRY_CPUSET=0 bench/exit/run-m5.sh`. A 30-minute
-  partial run passed every SLO (bench/RESULTS.md, M5); flat memory still
-  needs the long run. The M6 staging run (48 h) and production week cover
-  the 72-hour requirement.
+- **The long soak** was waived. A 30-minute partial run passed every SLO
+  (bench/RESULTS.md, M5); flat memory over hours is unproven. To run it on a
+  Linux host: `DURATION=4h RATE=10000 FERRY_CPUSET=0 bench/exit/run-m5.sh`.
+- **EKS staging and the production week** were dropped with paid hosting.
 - **p99 latency** end to end is still unproven off the WSL2 VM. Ferry's own
   histogram reads p50 13 µs / p99 25 µs at 10k req/s on one core.
 
@@ -254,14 +260,14 @@ reload: plan listener slots (keep / rename / bind new / retire) ▶ prepare ▶ 
 - Snapshot-stream certificates are read at start: after certgen renews them
   (`helm upgrade` within 90 days of expiry), restart controller and proxies
   (threat model R4). All proxies share one client identity, so a
-  compromised proxy can fetch any Gateway's snapshot (R1, planned for M6).
+  compromised proxy can fetch any Gateway's snapshot (R1).
 - The controller can read every Secret (RBAC cannot select by type; R2).
 - No Gateway listener isolation (`GatewayHTTPListenerIsolation`), ListenerSet,
   BackendTLSPolicy, RequestMirror, CORS, GEP-1731 HTTPRoute retries (use
   FerryPolicy `retry`), static Gateway addresses, `parametersRef` or
   per-Gateway infrastructure overrides.
 - Conformance and pod-kill chaos run on kind with MetalLB; EKS with the AWS
-  Load Balancer Controller and PROXY v2 is untested until M6 staging.
+  Load Balancer Controller and PROXY v2 is untested (no paid hosting).
 - Rate-limit splitting and connection caps assume an even spread of clients
   across replicas.
 - CL+TE requests are decoded by Transfer-Encoding and the connection closed,

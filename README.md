@@ -8,7 +8,12 @@ Ferry terminates TLS and proxies HTTP/1.1, HTTP/2, gRPC and WebSockets to backen
 pods. It is configured through the Kubernetes Gateway API and runs on AWS EKS
 behind a Network Load Balancer.
 
-> **Status: M5 (hardening) complete; next is M6, a production beta on EKS.**
+> **Try the free version:** a public demo of Ferry on Render's free tier,
+> one container with mock backends. It is not a production install;
+> [`docs/free-version.md`](docs/free-version.md) has the URL, what to try,
+> and how it differs from the real deal.
+
+> **Status: M5 (hardening) complete; M6 is a free public demo (ADR 0038).**
 > A Gateway API controller that passes the core conformance suite for
 > HTTPRoute and GRPCRoute (plus 19 extended HTTPRoute tests), provisions a
 > proxy fleet per Gateway and streams validated snapshots to it over mutual

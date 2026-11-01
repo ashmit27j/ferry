@@ -59,6 +59,17 @@ fn check_config_accepts_every_example() {
 }
 
 #[test]
+fn check_config_accepts_free_version() {
+    let path = repo_root().join("deploy/render/ferry.yaml");
+    let out = ferry(&["check-config", path.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn check_config_reports_every_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bad.yaml");

@@ -1,0 +1,18 @@
+# Render Blueprint for Ferry, free version (ADR 0038, docs/free-version.md).
+# In Render: New > Blueprint > this repository. Pushes to main redeploy.
+services:
+  - type: web
+    name: ferry-free
+    runtime: docker
+    plan: free
+    dockerfilePath: ./deploy/render/Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: FERRY_LOG
+        value: info
+      - key: FERRY_LOG_FORMAT
+        value: json

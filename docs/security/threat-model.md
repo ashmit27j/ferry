@@ -108,6 +108,18 @@ under **residual risks**, with an owner milestone.
 | Compromised GitHub Action | Actions pinned by commit SHA; minimal `permissions:` per workflow |
 | Tampered image | Cosign keyless signature and SPDX SBOM attestation per release; distroless base, non-root, read-only root filesystem |
 
+### B7. Internet → free public demo (Render)
+
+The free version (ADR 0038, `docs/free-version.md`) is one container on
+Render's free tier: Ferry plus mock backends, no secrets, no controller.
+
+| STRIDE | Threat | Mitigation | Evidence |
+| --- | --- | --- | --- |
+| D | Anyone floods a 0.1 CPU instance | Route rate limit 50/s (burst 100), `max_connections` 2000, 1 MiB body cap; Render's edge in front. Worst case is an unavailable demo | `deploy/render/ferry.yaml` |
+| I | Admin API or `/config` reached from the internet | Admin binds to 127.0.0.1; only port 10000 is published | `deploy/render/start.sh` |
+| S | Client IPs spoofed through `X-Forwarded-For` | The demo has no IP-based policy; Ferry appends Render's proxy address | ADR 0038 |
+| T | A malicious push redeploys the demo | Only the repository owner can push to `main`; Render deploys from `main` only | `render.yaml` |
+
 ## Residual risks
 
 | # | Risk | Severity | Why accepted now | Plan |
@@ -125,3 +137,4 @@ under **residual risks**, with an owner milestone.
 | --- | --- | --- |
 | 2026-10-13 | First full model (M5) | Added NetworkPolicies (B5), `max_connections` and `tunnel_idle` (B1), fuzz targets for every parser (B1, B3); R1–R6 accepted |
 | 2026-10-13 | M5 fuzzing and chaos | Fuzzing found a panic in `grpc-timeout` parsing (not reachable from clients) and durations that printed unparsably (would NACK snapshots); both fixed. Open tunnels escaped `max_connections`; fixed. Pod kills on kind dropped no requests. No open high-severity findings |
+| 2026-11-01 | Free public demo on Render (B7, ADR 0038) | Admin kept on loopback; demo rate, body and connection caps. Repository made public; history scanned for secrets first |

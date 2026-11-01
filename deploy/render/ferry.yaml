@@ -1,0 +1,97 @@
+# Ferry, free version: the public demo on Render's free tier (ADR 0038).
+#
+# One container runs this proxy and two mock backends on loopback
+# (deploy/render/start.sh). Render terminates TLS and forwards to port
+# 10000. See docs/free-version.md for how this differs from a production
+# install.
+#
+#   ferry check-config deploy/render/ferry.yaml
+
+listeners:
+  - name: public
+    address: 0.0.0.0:10000
+    limits:
+      max_connections: 2000
+      max_request_body_bytes: 1048576   # 1 MiB: the demo echoes, nothing more
+    routes:
+      # The landing URL explains what this is.
+      - name: home
+        rules:
+          - matches: [{ path: { type: Exact, value: / } }]
+            filters:
+              - type: RequestRedirect
+                scheme: https
+                hostname: github.com
+                path: { type: ReplaceFullPath, replace_full_path: /ashmit27j/ferry/blob/main/docs/free-version.md }
+                status_code: 302
+
+      # Render's health check.
+      - name: health
+        rules:
+          - matches: [{ path: { type: Exact, value: /healthz } }]
+            backends: [{ cluster: a }]
+
+      - name: demo
+        rate_limit: { requests: 50, per: 1s, burst: 100 }
+        rules:
+          # Round robin across both backends: x-mock-backend alternates.
+          - matches: [{ path: { type: PathPrefix, value: /hello } }]
+            filters:
+              - type: ResponseHeaderModifier
+                set: [{ name: x-ferry-edition, value: free }]
+            backends: [{ cluster: both }]
+
+          # A 90/10 canary split.
+          - matches: [{ path: { type: PathPrefix, value: /canary } }]
+            filters:
+              - type: ResponseHeaderModifier
+                set: [{ name: x-ferry-edition, value: free }]
+            backends:
+              - { cluster: a, weight: 90 }
+              - { cluster: b, weight: 10 }
+
+          # Header match: testers opt into b.
+          - matches:
+              - path: { type: PathPrefix, value: /canary }
+                headers: [{ name: x-canary, value: always }]
+            filters:
+              - type: ResponseHeaderModifier
+                set: [{ name: x-ferry-edition, value: free }]
+            backends: [{ cluster: b }]
+
+          # Retries: half of flaky's responses are 503, and Ferry retries
+          # them, so most requests still get a 200.
+          - matches: [{ path: { type: PathPrefix, value: /retry } }]
+            timeouts: { request: 5s }
+            retry: { attempts: 2, codes: [503], backoff: 25ms }
+            filters:
+              - type: ResponseHeaderModifier
+                set: [{ name: x-ferry-edition, value: free }]
+            backends: [{ cluster: flaky }]
+
+          # WebSocket echo; the request timeout only covers the upgrade.
+          - matches: [{ path: { type: PathPrefix, value: /ws } }]
+            timeouts: { request: 10s }
+            backends: [{ cluster: ws }]
+
+clusters:
+  - name: both
+    lb_policy: round_robin
+    health_check: { interval: 5s, http: { path: /healthz } }
+    endpoints:
+      - address: 127.0.0.1:9001
+      - address: 127.0.0.1:9002
+
+  - name: a
+    health_check: { interval: 5s, http: { path: /healthz } }
+    endpoints: [{ address: 127.0.0.1:9001 }]
+
+  - name: b
+    health_check: { interval: 5s, http: { path: /healthz } }
+    endpoints: [{ address: 127.0.0.1:9002 }]
+
+  - name: flaky
+    endpoints: [{ address: 127.0.0.1:9003 }]
+
+  - name: ws
+    endpoints: [{ address: 127.0.0.1:9201 }]
