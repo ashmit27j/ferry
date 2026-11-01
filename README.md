@@ -79,6 +79,12 @@ Everything except the AWS-specific pieces (NLB, ECR, IAM roles for service
 accounts) can be exercised with Option A. Start there even if you plan to use
 AWS: the kind cluster runs the same chart and the same controller.
 
+To host a public copy for free, deploy the **free version** to Render's
+free tier: `render.yaml` sets it up (New > Blueprint in Render). It is one
+container with mock backends, not either option above;
+[`docs/free-version.md`](docs/free-version.md) compares it with a real
+install.
+
 ## Prerequisites
 
 Common to both options:
