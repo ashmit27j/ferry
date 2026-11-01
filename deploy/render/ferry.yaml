@@ -1,6 +1,6 @@
 # Ferry, free version: the public demo on Render's free tier (ADR 0038).
 #
-# One container runs this proxy and two mock backends on loopback
+# One container runs this proxy and four mock backends on loopback
 # (deploy/render/start.sh). Render terminates TLS and forwards to port
 # 10000. See docs/free-version.md for how this differs from a production
 # install.
@@ -14,16 +14,12 @@ listeners:
       max_connections: 2000
       max_request_body_bytes: 1048576   # 1 MiB: the demo echoes, nothing more
     routes:
-      # The landing URL explains what this is.
+      # The landing page (deploy/render/index.html): explains the demo and
+      # runs it from the browser.
       - name: home
         rules:
           - matches: [{ path: { type: Exact, value: / } }]
-            filters:
-              - type: RequestRedirect
-                scheme: https
-                hostname: github.com
-                path: { type: ReplaceFullPath, replace_full_path: /ashmit27j/ferry/blob/main/docs/free-version.md }
-                status_code: 302
+            backends: [{ cluster: site }]
 
       # Render's health check.
       - name: health
@@ -92,6 +88,10 @@ clusters:
 
   - name: flaky
     endpoints: [{ address: 127.0.0.1:9003 }]
+
+  - name: site
+    health_check: { interval: 5s, http: { path: /healthz } }
+    endpoints: [{ address: 127.0.0.1:9004 }]
 
   - name: ws
     endpoints: [{ address: 127.0.0.1:9201 }]

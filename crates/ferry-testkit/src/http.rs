@@ -165,6 +165,15 @@ async fn respond(
         }
         return Ok(resp);
     }
+    if let Some(page) = &behavior.page {
+        stats.record(false);
+        let mut resp = Response::new(MockBody::now(page.clone()));
+        resp.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        );
+        return Ok(resp);
+    }
     let span = behavior.tracing.as_ref().map(|t| {
         let span = t.server_span(
             req.headers(),

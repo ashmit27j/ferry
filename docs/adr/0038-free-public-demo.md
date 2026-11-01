@@ -32,9 +32,12 @@ Blueprint (`render.yaml`):
   started by `deploy/render/start.sh`. Ferry runs as PID 1 so Render's
   SIGTERM starts a normal drain.
 - The config demos round robin, a 90/10 canary, a header match, retries
-  against a backend that fails half the time, and WebSockets. `/` redirects
-  to `docs/free-version.md`, which states the differences from a production
-  install. Demo responses carry `x-ferry-edition: free`.
+  against a backend that fails half the time, and WebSockets. `/` serves a
+  landing page (`deploy/render/index.html`, from a fourth mock started with
+  `--page`) that runs each demo from the browser and links to
+  `docs/free-version.md`, which states the differences from a production
+  install. Demo responses carry `x-ferry-edition: free`. (At first `/`
+  redirected to the docs on GitHub; a visitor saw only the repository.)
 - Only port 10000 is public. The admin API binds to loopback, so metrics and
   `/config` are not exposed.
 - A route rate limit (50/s, burst 100), a 1 MiB body cap and a 2000

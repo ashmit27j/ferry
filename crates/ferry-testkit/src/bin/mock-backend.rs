@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! mock-backend --name a --http 127.0.0.1:9001 --grpc 127.0.0.1:9101 --ws 127.0.0.1:9201
+//! mock-backend --name site --http 127.0.0.1:9004 --page index.html
 //! ```
 
 use std::net::SocketAddr;
@@ -42,6 +43,10 @@ struct Args {
     /// span (service `mock-<name>`) continuing the caller's trace.
     #[arg(long, env = "OTEL_EXPORTER_OTLP_ENDPOINT")]
     otlp_endpoint: Option<String>,
+    /// HTML file the HTTP server returns for every request, instead of the
+    /// JSON echo.
+    #[arg(long)]
+    page: Option<std::path::PathBuf>,
 }
 
 #[tokio::main]
@@ -50,6 +55,10 @@ async fn main() -> anyhow::Result<()> {
     let mut behavior = Behavior::named(&args.name)
         .with_latency(Duration::from_millis(args.latency_ms))
         .with_errors(args.error_rate, args.error_status);
+    if let Some(path) = &args.page {
+        let html = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        behavior = behavior.with_page(html);
+    }
     let tracing = match args.otlp_endpoint.as_deref() {
         Some(endpoint) if !endpoint.is_empty() => {
             let t = Arc::new(ferry_telemetry::Tracing::otlp(&TraceConfig {

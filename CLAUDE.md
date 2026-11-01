@@ -38,6 +38,7 @@ python crates/ferry-controller/gen/gateway_api.py v1.6.3 --crds   # regenerate G
 cargo run -p ferry -- crds > deploy/helm/ferry/crds/ferrypolicies.yaml  # after changing FerryPolicy (a test checks)
 docker build -t ferry:dev .                   # distroless image: proxy, controller, certgen
 docker build -f deploy/render/Dockerfile -t ferry-free .   # free version: Ferry + mock backends, port 10000
+deploy/render/smoke.sh https://ferry-free.onrender.com     # check the live free version against its docs
 python deploy/grafana/generate.py deploy/grafana/ferry-dashboard.json   # then: cargo nextest run --test dashboard
 
 cargo run -p ferry -- proxy --config examples/hello.yaml       # reloads the file on change
@@ -190,6 +191,7 @@ reload: plan listener slots (keep / rename / bind new / retire) ▶ prepare ▶ 
 - `ferry-testkit`: mocks with `Behavior { latency, error_rate, error_status,
   tracing }` (`with_tracing` makes the HTTP mock record server spans);
   `trace-client` and `ws-flood` (hold N WebSockets) binaries;
+  `mock-backend --page <html>` serves a static page instead of the echo;
   the HTTP mock honours `x-mock-latency-ms`, `x-mock-status` and
   `x-mock-body-delay-ms`, and `http::spawn_tls` reports ALPN and client
   certificates. `MockServer::set_healthy` flips `/healthz` and gRPC health.
@@ -198,7 +200,9 @@ reload: plan listener slots (keep / rename / bind new / retire) ▶ prepare ▶ 
   `TestProxy::start_with_telemetry`, `serve_admin`, `metrics_text`, `metric`;
   `tracing.rs` runs an OTLP collector in-process; `dashboard.rs`, `alerts.rs`.
 - Free version (ADR 0038): `render.yaml` (Render Blueprint, autodeploys
-  `main`), `deploy/render/{Dockerfile,start.sh,ferry.yaml}`. Changing the
+  `main`), `deploy/render/{Dockerfile,start.sh,ferry.yaml,index.html,smoke.sh}`
+  (`index.html` is the landing page, served by `mock-backend --page`); live at
+  `https://ferry-free.onrender.com`. Changing the
   demo config redeploys the public URL; keep `docs/free-version.md` (the
   free-vs-production table) in step. A CLI test validates the config.
 - `deploy/grafana/` (dashboard + generator, ADR 0031), `deploy/observability/`
@@ -244,7 +248,7 @@ reload: plan listener slots (keep / rename / bind new / retire) ▶ prepare ▶ 
 | M3 Observability and admin | Approved 2026-10-13 |
 | M4 Kubernetes controller | Approved 2026-10-13 |
 | M5 Hardening | Approved 2026-11-01, long soak waived |
-| **M6 Free public demo** | In progress: Render free tier (ADR 0038); replaces the paid EKS beta |
+| **M6 Free public demo** | Live on Render 2026-11-01, `smoke.sh` passes; awaiting approval (ADR 0038 replaces the paid EKS beta) |
 
 ### Waived or dropped (the plan owner's call, 2026-11-01)
 

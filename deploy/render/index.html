@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferry, free version</title>
+<meta name="description" content="A live demo of Ferry, a Kubernetes-native L7 load balancer in Rust, on Render's free tier.">
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --text: #1b1b1a; --muted: #5f5e5a;
+    --line: #e2e1dc; --accent: #0b6e69; --accent-text: #ffffff;
+    --a: #2f6fd6; --b: #c2571a; --ok: #1f7a3a; --bad: #b3261e; --warn: #8a6100;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413; --panel: #1d1d1b; --text: #ecebe6; --muted: #a3a29b;
+      --line: #33332f; --accent: #3fb8ae; --accent-text: #0d1f1e;
+      --a: #7aa7f0; --b: #f0956a; --ok: #6cc785; --bad: #f07a72; --warn: #e0b54a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 880px; margin: 0 auto; padding: 48px 16px 64px; }
+  h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.01em; }
+  h2 { font-size: 1.05rem; margin: 0; }
+  p { margin: 0 0 12px; }
+  a { color: var(--accent); }
+  code { font-family: var(--mono); font-size: 0.88em; }
+  .tag {
+    display: inline-block; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em;
+    text-transform: uppercase; color: var(--accent); margin-bottom: 12px;
+  }
+  .lead { color: var(--muted); max-width: 64ch; }
+  .note {
+    border-left: 3px solid var(--warn); padding: 8px 12px; margin: 20px 0 32px;
+    color: var(--muted); font-size: 0.92rem; background: var(--panel);
+  }
+  .demos { display: grid; gap: 16px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .card header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .card p { color: var(--muted); font-size: 0.93rem; margin: 6px 0 12px; }
+  button {
+    font: inherit; font-size: 0.9rem; font-weight: 600; cursor: pointer; flex-shrink: 0;
+    background: var(--accent); color: var(--accent-text); border: 0; border-radius: 6px;
+    padding: 7px 14px;
+  }
+  button:disabled { opacity: 0.55; cursor: progress; }
+  .out { display: flex; flex-wrap: wrap; gap: 6px; min-height: 28px; align-items: center; }
+  .chip {
+    font-family: var(--mono); font-size: 0.82rem; padding: 2px 8px; border-radius: 4px;
+    border: 1px solid var(--line);
+  }
+  .chip.a { color: var(--a); border-color: var(--a); }
+  .chip.b { color: var(--b); border-color: var(--b); }
+  .chip.ok { color: var(--ok); border-color: var(--ok); }
+  .chip.bad { color: var(--bad); border-color: var(--bad); }
+  .chip.warn { color: var(--warn); border-color: var(--warn); }
+  .sum { font-size: 0.88rem; color: var(--muted); margin-top: 8px; min-height: 1.4em; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; margin-top: 12px; }
+  th, td { text-align: left; vertical-align: top; padding: 8px 10px 8px 0; border-bottom: 1px solid var(--line); }
+  th { font-weight: 600; }
+  td:first-child { color: var(--muted); white-space: nowrap; }
+  section { margin-top: 44px; }
+  footer { margin-top: 44px; color: var(--muted); font-size: 0.88rem; }
+  @media (max-width: 560px) {
+    h1 { font-size: 1.6rem; }
+    .card header { flex-direction: column; align-items: flex-start; }
+    td:first-child { white-space: normal; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <span class="tag">Free version · live demo</span>
+  <h1>Ferry</h1>
+  <p class="lead">
+    A Kubernetes-native L7 load balancer and API gateway, written in Rust.
+    This page is served <em>through</em> Ferry, and every button below sends
+    real requests through it to mock backends running in the same container.
+  </p>
+  <div class="note">
+    This is a demo on Render's free tier: one small container, three mock
+    backends, a fixed config. It is not a production deployment. Requests
+    are rate-limited to 50/s across everyone, so you may see a 429.
+  </div>
+
+  <div class="demos">
+    <div class="card">
+      <header><h2>Round robin</h2><button data-run="rr">Send 8 requests</button></header>
+      <p><code>GET /hello</code> goes to a cluster of two backends. Ferry alternates between them.</p>
+      <div class="out" id="rr"></div><div class="sum" id="rr-sum"></div>
+    </div>
+
+    <div class="card">
+      <header><h2>Canary split</h2><button data-run="canary">Send 20 requests</button></header>
+      <p><code>GET /canary</code> is weighted 90/10 between backend <b>a</b> and backend <b>b</b>.</p>
+      <div class="out" id="canary"></div><div class="sum" id="canary-sum"></div>
+    </div>
+
+    <div class="card">
+      <header><h2>Header match</h2><button data-run="header">Send 5 requests</button></header>
+      <p>The same path with <code>x-canary: always</code> matches a more specific rule that always picks <b>b</b>.</p>
+      <div class="out" id="header"></div><div class="sum" id="header-sum"></div>
+    </div>
+
+    <div class="card">
+      <header><h2>Retries</h2><button data-run="retry">Send 20 requests</button></header>
+      <p><code>GET /retry</code> hits a backend that fails half the time. Ferry retries 503s up to twice, so about 7 in 8 requests still succeed.</p>
+      <div class="out" id="retry"></div><div class="sum" id="retry-sum"></div>
+    </div>
+
+    <div class="card">
+      <header><h2>No route</h2><button data-run="nope">Send 1 request</button></header>
+      <p><code>GET /nope</code> matches no route, so Ferry answers 404 itself.</p>
+      <div class="out" id="nope"></div><div class="sum" id="nope-sum"></div>
+    </div>
+
+    <div class="card">
+      <header><h2>WebSocket</h2><button data-run="ws">Open and send 3</button></header>
+      <p>Ferry upgrades <code>/ws</code> and tunnels the connection to an echo backend.</p>
+      <div class="out" id="ws"></div><div class="sum" id="ws-sum"></div>
+    </div>
+  </div>
+
+  <section>
+    <h2>Free version vs a production install</h2>
+    <table>
+      <thead><tr><th></th><th>This demo</th><th>Production</th></tr></thead>
+      <tbody>
+        <tr><td>Runs on</td><td>One container on Render's free tier</td><td>A proxy fleet per Gateway on Kubernetes, with an HPA and a PDB</td></tr>
+        <tr><td>Config</td><td>A fixed YAML file</td><td>The Gateway API and <code>FerryPolicy</code>, streamed to proxies over mTLS</td></tr>
+        <tr><td>Backends</td><td>Mock echo servers in the same container</td><td>Your Services, discovered from EndpointSlices</td></tr>
+        <tr><td>TLS</td><td>Terminated by Render</td><td>Terminated by Ferry: SNI, hot rotation, mTLS to backends</td></tr>
+        <tr><td>Availability</td><td>Sleeps after 15 idle minutes</td><td>Multiple replicas, zero-drop restarts, SLOs with alerts</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer>
+    <a href="https://github.com/ashmit27j/ferry">Source on GitHub</a> ·
+    <a href="https://github.com/ashmit27j/ferry/blob/main/docs/free-version.md">How this demo works</a> ·
+    <a href="https://github.com/ashmit27j/ferry/blob/main/deploy/render/ferry.yaml">Its Ferry config</a>
+  </footer>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  function chip(out, text, cls) {
+    const el = document.createElement("span");
+    el.className = "chip" + (cls ? " " + cls : "");
+    el.textContent = text;
+    out.appendChild(el);
+  }
+
+  async function call(path, headers) {
+    try {
+      const r = await fetch(path, { cache: "no-store", headers: headers || {} });
+      const body = await r.text();
+      return { status: r.status, backend: r.headers.get("x-mock-backend"), body };
+    } catch (e) {
+      return { status: 0, backend: null, body: String(e) };
+    }
+  }
+
+  function backendChip(out, r) {
+    if (r.status === 200 && r.backend) chip(out, r.backend, r.backend === "a" ? "a" : "b");
+    else chip(out, String(r.status || "error"), r.status === 429 ? "warn" : "bad");
+  }
+
+  function counts(list) {
+    const c = {};
+    for (const x of list) c[x] = (c[x] || 0) + 1;
+    return Object.entries(c).map(([k, v]) => `${k}: ${v}`).join(", ");
+  }
+
+  const demos = {
+    async rr(out, sum) {
+      const seen = [];
+      for (let i = 0; i < 8; i++) {
+        const r = await call("/hello");
+        backendChip(out, r);
+        seen.push(r.backend || r.status);
+      }
+      sum.textContent = counts(seen);
+    },
+    async canary(out, sum) {
+      const seen = [];
+      for (let i = 0; i < 20; i++) {
+        const r = await call("/canary");
+        backendChip(out, r);
+        seen.push(r.backend || r.status);
+      }
+      sum.textContent = counts(seen) + " (expect about 18 a, 2 b)";
+    },
+    async header(out, sum) {
+      const seen = [];
+      for (let i = 0; i < 5; i++) {
+        const r = await call("/canary", { "x-canary": "always" });
+        backendChip(out, r);
+        seen.push(r.backend || r.status);
+      }
+      sum.textContent = counts(seen);
+    },
+    async retry(out, sum) {
+      const seen = [];
+      for (let i = 0; i < 20; i++) {
+        const r = await call("/retry");
+        chip(out, String(r.status || "error"), r.status === 200 ? "ok" : r.status === 429 ? "warn" : "bad");
+        seen.push(r.status);
+      }
+      const ok = seen.filter((s) => s === 200).length;
+      sum.textContent = `${ok} of 20 succeeded. Without retries, about 10 would.`;
+    },
+    async nope(out, sum) {
+      const r = await call("/nope");
+      chip(out, String(r.status || "error"), r.status === 404 ? "ok" : "bad");
+      sum.textContent = r.status === 404 ? "Answered by Ferry: no route matched." : r.body.slice(0, 120);
+    },
+    ws(out, sum) {
+      return new Promise((resolve) => {
+        const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+        let got = 0;
+        let ws;
+        const done = (msg) => { sum.textContent = msg; try { ws.close(); } catch (e) {} resolve(); };
+        const timer = setTimeout(() => done(`Timed out after ${got} of 3 echoes.`), 10000);
+        try { ws = new WebSocket(url); } catch (e) { clearTimeout(timer); return done(String(e)); }
+        ws.onopen = () => { chip(out, "open", "ok"); for (let i = 1; i <= 3; i++) ws.send("hello " + i); };
+        ws.onmessage = (e) => {
+          chip(out, "echo: " + e.data, "a");
+          if (++got === 3) { clearTimeout(timer); done("3 of 3 messages echoed over one upgraded connection."); }
+        };
+        ws.onerror = () => { clearTimeout(timer); chip(out, "error", "bad"); done("The WebSocket failed to open."); };
+      });
+    },
+  };
+
+  document.querySelectorAll("button[data-run]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.run;
+      const out = $(id), sum = $(id + "-sum");
+      out.textContent = ""; sum.textContent = "";
+      btn.disabled = true;
+      await demos[id](out, sum);
+      btn.disabled = false;
+    });
+  });
+</script>
+</body>
+</html>

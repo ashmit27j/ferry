@@ -18,7 +18,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /usr/local/bin/ferry /usr/local/bin/mock-backend /usr/local/bin/
-COPY deploy/render/ferry.yaml /etc/ferry/ferry.yaml
+COPY deploy/render/ferry.yaml deploy/render/index.html /etc/ferry/
 COPY --chmod=0755 deploy/render/start.sh /usr/local/bin/start.sh
 USER 65532:65532
 EXPOSE 10000

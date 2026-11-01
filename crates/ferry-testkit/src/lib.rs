@@ -46,6 +46,9 @@ pub struct Behavior {
     /// When set, the HTTP mock records a server span per request,
     /// continuing the caller's `traceparent`, as an instrumented service would.
     pub tracing: Option<Arc<ferry_telemetry::Tracing>>,
+    /// When set, the HTTP mock answers every request (except `/healthz`)
+    /// with this HTML page instead of the JSON echo.
+    pub page: Option<bytes::Bytes>,
 }
 
 impl Behavior {
@@ -58,7 +61,15 @@ impl Behavior {
             error_rate: 0.0,
             error_status: 503,
             tracing: None,
+            page: None,
         }
+    }
+
+    /// Serves `html` for every HTTP request instead of the JSON echo.
+    #[must_use]
+    pub fn with_page(mut self, html: impl Into<bytes::Bytes>) -> Self {
+        self.page = Some(html.into());
+        self
     }
 
     /// Records a server span for every HTTP request.
