@@ -13,7 +13,10 @@ anything you care about behind it.
 - Why it is built this way: [ADR 0038](adr/0038-free-public-demo.md)
 
 Open the URL in a browser: the landing page runs every demo below from
-buttons, through Ferry. The first request after 15 idle minutes takes 30 to 60 seconds: the free
+buttons, through Ferry, beside a live dashboard. The dashboard reads
+`/stats` (Ferry's Prometheus metrics, rewritten to the admin API's
+`/metrics`) every 2 seconds, so it shows everyone's traffic since the
+container last woke. The first request after 15 idle minutes takes 30 to 60 seconds: the free
 tier stops the container when it's idle and starts it on demand.
 
 ## Try it
@@ -58,7 +61,7 @@ a cloud load balancer, configured by the Gateway API.
 | Load balancer in front | Render's shared proxy | A cloud NLB with PROXY protocol v2, so Ferry sees real client IPs |
 | HTTP/2 and gRPC from clients | Whatever Render's edge supports; gRPC is not demoed | Full HTTP/2 and gRPC, including gRPC deadlines and trailers |
 | Availability | One instance, sleeps after 15 idle minutes, no SLO | Multiple replicas, zero-drop rolling restarts, SLOs with alerts |
-| Observability | JSON logs in the Render dashboard; metrics and admin API are private to the container | Prometheus metrics, Grafana dashboard, alerting rules with runbooks, OpenTelemetry traces |
+| Observability | JSON logs in the Render dashboard; metrics are public at `/stats` and drawn live by the landing page; the rest of the admin API stays private | Prometheus metrics, Grafana dashboard, alerting rules with runbooks, OpenTelemetry traces |
 | Image | Debian slim plus a shell to start the mocks, amd64 only | Distroless, no shell, read-only root, multi-arch, Cosign-signed with an SBOM |
 | Rate limits | One global 50 req/s limit to protect a tiny instance | Per-route and per-key limits you set, split across replicas |
 | Cost | Free | Whatever your cluster and load balancer cost |

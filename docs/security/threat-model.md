@@ -116,7 +116,7 @@ Render's free tier: Ferry plus mock backends, no secrets, no controller.
 | STRIDE | Threat | Mitigation | Evidence |
 | --- | --- | --- | --- |
 | D | Anyone floods a 0.1 CPU instance | Route rate limit 50/s (burst 100), `max_connections` 2000, 1 MiB body cap; Render's edge in front. Worst case is an unavailable demo | `deploy/render/ferry.yaml` |
-| I | Admin API or `/config` reached from the internet | Admin binds to 127.0.0.1; only port 10000 is published | `deploy/render/start.sh` |
+| I | Admin API or `/config` reached from the internet | Admin binds to 127.0.0.1; only port 10000 is published. `/stats` exposes `/metrics` alone (exact path, URL rewrite), rate-limited to 20/s; it reveals names the public config already shows, counters and process stats, no client data | `deploy/render/start.sh`, `deploy/render/ferry.yaml`, `smoke.sh` |
 | S | Client IPs spoofed through `X-Forwarded-For` | The demo has no IP-based policy; Ferry appends Render's proxy address | ADR 0038 |
 | T | A malicious push redeploys the demo | Only the repository owner can push to `main`; Render deploys from `main` only | `render.yaml` |
 

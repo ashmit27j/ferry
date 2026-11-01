@@ -21,6 +21,17 @@ listeners:
           - matches: [{ path: { type: Exact, value: / } }]
             backends: [{ cluster: site }]
 
+      # The landing page's live dashboard: Ferry's own metrics, and nothing
+      # else from the admin API (/config, /clusters stay private).
+      - name: stats
+        rate_limit: { requests: 20, per: 1s, burst: 40 }
+        rules:
+          - matches: [{ path: { type: Exact, value: /stats } }]
+            filters:
+              - type: URLRewrite
+                path: { type: ReplaceFullPath, replace_full_path: /metrics }
+            backends: [{ cluster: admin }]
+
       # Render's health check.
       - name: health
         rules:
@@ -88,6 +99,9 @@ clusters:
 
   - name: flaky
     endpoints: [{ address: 127.0.0.1:9003 }]
+
+  - name: admin
+    endpoints: [{ address: 127.0.0.1:9901 }]
 
   - name: site
     health_check: { interval: 5s, http: { path: /healthz } }

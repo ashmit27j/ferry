@@ -38,8 +38,12 @@ Blueprint (`render.yaml`):
   `docs/free-version.md`, which states the differences from a production
   install. Demo responses carry `x-ferry-edition: free`. (At first `/`
   redirected to the docs on GitHub; a visitor saw only the repository.)
-- Only port 10000 is public. The admin API binds to loopback, so metrics and
-  `/config` are not exposed.
+- Only port 10000 is public. The admin API binds to loopback. One route,
+  `/stats` (rate-limited to 20/s), rewrites to its `/metrics` so the
+  landing page can draw a live dashboard; `/config`, `/clusters` and the
+  rest stay private. The metrics carry route, cluster and listener names,
+  counters and process stats, all of which the public config already
+  reveals; no client addresses or secrets.
 - A route rate limit (50/s, burst 100), a 1 MiB body cap and a 2000
   connection cap keep a shared 0.1 CPU instance usable.
 - The repository is public so the docs link resolves and anyone can deploy

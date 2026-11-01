@@ -35,6 +35,7 @@ bad=$(for _ in $(seq 80); do status "$URL/retry"; echo; done | grep -c '^503$' |
 check "/retry retries 503s ($bad of 80 failed)" "$([ "$bad" -le 24 ] && echo 1)"
 
 check "unknown path is 404" "$([ "$(status "$URL/nope")" = 404 ] && echo 1)"
+check "/stats serves Ferry's metrics" "$(curl -s -m 20 "$URL/stats" | grep -q '^ferry_requests_total{' && echo 1)"
 for p in /metrics /config /clusters; do
     check "admin $p is not public" "$([ "$(status "$URL$p")" = 404 ] && echo 1)"
 done

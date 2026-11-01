@@ -7,16 +7,16 @@
 <meta name="description" content="A live demo of Ferry, a Kubernetes-native L7 load balancer in Rust, on Render's free tier.">
 <style>
   :root {
-    --bg: #f7f7f5; --panel: #ffffff; --text: #1b1b1a; --muted: #5f5e5a;
-    --line: #e2e1dc; --accent: #0b6e69; --accent-text: #ffffff;
+    --bg: #f7f7f5; --panel: #ffffff; --text: #1b1b1a; --muted: #5f5e5a; --faint: #8b8a84;
+    --line: #e2e1dc; --grid: #eeede9; --accent: #0b6e69; --accent-text: #ffffff;
     --a: #2f6fd6; --b: #c2571a; --ok: #1f7a3a; --bad: #b3261e; --warn: #8a6100;
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #141413; --panel: #1d1d1b; --text: #ecebe6; --muted: #a3a29b;
-      --line: #33332f; --accent: #3fb8ae; --accent-text: #0d1f1e;
-      --a: #7aa7f0; --b: #f0956a; --ok: #6cc785; --bad: #f07a72; --warn: #e0b54a;
+      --bg: #141413; --panel: #1d1d1b; --text: #ecebe6; --muted: #a3a29b; --faint: #75746e;
+      --line: #33332f; --grid: #2a2a27; --accent: #3fb8ae; --accent-text: #0d1f1e;
+      --a: #5b8fe6; --b: #d36d38; --ok: #6cc785; --bad: #f07a72; --warn: #e0b54a;
     }
   }
   * { box-sizing: border-box; }
@@ -24,9 +24,10 @@
     margin: 0; background: var(--bg); color: var(--text);
     font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
   }
-  main { max-width: 880px; margin: 0 auto; padding: 48px 16px 64px; }
+  main { max-width: 1140px; margin: 0 auto; padding: 48px 16px 64px; }
   h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.01em; }
   h2 { font-size: 1.05rem; margin: 0; }
+  h3 { font-size: 0.8rem; font-weight: 600; color: var(--muted); margin: 18px 0 8px; text-transform: uppercase; letter-spacing: 0.04em; }
   p { margin: 0 0 12px; }
   a { color: var(--accent); }
   code { font-family: var(--mono); font-size: 0.88em; }
@@ -34,16 +35,18 @@
     display: inline-block; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em;
     text-transform: uppercase; color: var(--accent); margin-bottom: 12px;
   }
-  .lead { color: var(--muted); max-width: 64ch; }
+  .lead { color: var(--muted); max-width: 70ch; }
   .note {
     border-left: 3px solid var(--warn); padding: 8px 12px; margin: 20px 0 32px;
-    color: var(--muted); font-size: 0.92rem; background: var(--panel);
+    color: var(--muted); font-size: 0.92rem; background: var(--panel); max-width: 70ch;
   }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 24px; align-items: start; }
   .demos { display: grid; gap: 16px; }
-  .card {
+  .card, .dash {
     background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
     padding: 18px 20px;
   }
+  .dash { position: sticky; top: 16px; }
   .card header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .card p { color: var(--muted); font-size: 0.93rem; margin: 6px 0 12px; }
   button {
@@ -63,12 +66,50 @@
   .chip.bad { color: var(--bad); border-color: var(--bad); }
   .chip.warn { color: var(--warn); border-color: var(--warn); }
   .sum { font-size: 0.88rem; color: var(--muted); margin-top: 8px; min-height: 1.4em; }
+
+  /* Live dashboard */
+  .dash-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .live { font-size: 0.8rem; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+  .dot.on { background: var(--ok); }
+  .dash-sub { font-size: 0.82rem; color: var(--muted); margin: 6px 0 4px; }
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+  .tile { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .tile .k { font-size: 0.78rem; color: var(--muted); }
+  .tile .v { font-size: 1.45rem; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1.25; }
+  .tile .u { font-size: 0.8rem; color: var(--muted); font-weight: 400; margin-left: 2px; }
+  .chart { position: relative; }
+  .chart svg { display: block; width: 100%; height: 120px; overflow: visible; }
+  .tip {
+    position: absolute; pointer-events: none; background: var(--text); color: var(--bg);
+    font-size: 0.78rem; padding: 3px 7px; border-radius: 4px; white-space: nowrap;
+    transform: translate(-50%, -110%); display: none; font-variant-numeric: tabular-nums;
+  }
+  .bars { display: grid; gap: 8px; }
+  .bar-row { display: grid; grid-template-columns: 52px 1fr 64px; align-items: center; gap: 8px; font-size: 0.85rem; }
+  .bar-row .name { color: var(--muted); font-family: var(--mono); }
+  .bar-row .n { text-align: right; font-variant-numeric: tabular-nums; }
+  .track { height: 12px; display: flex; gap: 2px; }
+  .seg { height: 100%; border-radius: 0 4px 4px 0; min-width: 0; transition: width 0.4s; }
+  .seg.first { border-radius: 0; }
+  .seg:only-child { border-radius: 0 4px 4px 0; }
+  .legend { display: flex; gap: 14px; font-size: 0.78rem; color: var(--muted); margin-top: 8px; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  .replies { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; font-size: 0.86rem; }
+  .replies span:nth-child(odd) { color: var(--muted); }
+  .replies span:nth-child(even) { text-align: right; font-variant-numeric: tabular-nums; }
+  .err { font-size: 0.82rem; color: var(--bad); margin-top: 8px; }
+
   table { width: 100%; border-collapse: collapse; font-size: 0.9rem; margin-top: 12px; }
   th, td { text-align: left; vertical-align: top; padding: 8px 10px 8px 0; border-bottom: 1px solid var(--line); }
   th { font-weight: 600; }
   td:first-child { color: var(--muted); white-space: nowrap; }
-  section { margin-top: 44px; }
+  section { margin-top: 44px; max-width: 880px; }
   footer { margin-top: 44px; color: var(--muted); font-size: 0.88rem; }
+  @media (max-width: 920px) {
+    .layout { grid-template-columns: 1fr; }
+    .dash { position: static; order: -1; }
+  }
   @media (max-width: 560px) {
     h1 { font-size: 1.6rem; }
     .card header { flex-direction: column; align-items: flex-start; }
@@ -84,49 +125,94 @@
     A Kubernetes-native L7 load balancer and API gateway, written in Rust.
     This page is served <em>through</em> Ferry, and every button below sends
     real requests through it to mock backends running in the same container.
+    The live dashboard reads Ferry's own metrics, so you can watch your
+    requests land.
   </p>
   <div class="note">
-    This is a demo on Render's free tier: one small container, three mock
+    This is a demo on Render's free tier: one small container, mock
     backends, a fixed config. It is not a production deployment. Requests
     are rate-limited to 50/s across everyone, so you may see a 429.
   </div>
 
-  <div class="demos">
-    <div class="card">
-      <header><h2>Round robin</h2><button data-run="rr">Send 8 requests</button></header>
-      <p><code>GET /hello</code> goes to a cluster of two backends. Ferry alternates between them.</p>
-      <div class="out" id="rr"></div><div class="sum" id="rr-sum"></div>
+  <div class="layout">
+    <div class="demos">
+      <div class="card">
+        <header><h2>Round robin</h2><button data-run="rr">Send 8 requests</button></header>
+        <p><code>GET /hello</code> goes to a cluster of two backends. Ferry alternates between them.</p>
+        <div class="out" id="rr"></div><div class="sum" id="rr-sum"></div>
+      </div>
+
+      <div class="card">
+        <header><h2>Canary split</h2><button data-run="canary">Send 20 requests</button></header>
+        <p><code>GET /canary</code> is weighted 90/10 between backend <b>a</b> and backend <b>b</b>.</p>
+        <div class="out" id="canary"></div><div class="sum" id="canary-sum"></div>
+      </div>
+
+      <div class="card">
+        <header><h2>Header match</h2><button data-run="header">Send 5 requests</button></header>
+        <p>The same path with <code>x-canary: always</code> matches a more specific rule that always picks <b>b</b>.</p>
+        <div class="out" id="header"></div><div class="sum" id="header-sum"></div>
+      </div>
+
+      <div class="card">
+        <header><h2>Retries</h2><button data-run="retry">Send 20 requests</button></header>
+        <p><code>GET /retry</code> hits a backend that fails half the time. Ferry retries 503s up to twice, so about 7 in 8 requests still succeed.</p>
+        <div class="out" id="retry"></div><div class="sum" id="retry-sum"></div>
+      </div>
+
+      <div class="card">
+        <header><h2>No route</h2><button data-run="nope">Send 1 request</button></header>
+        <p><code>GET /nope</code> matches no route, so Ferry answers 404 itself.</p>
+        <div class="out" id="nope"></div><div class="sum" id="nope-sum"></div>
+      </div>
+
+      <div class="card">
+        <header><h2>WebSocket</h2><button data-run="ws">Open and send 3</button></header>
+        <p>Ferry upgrades <code>/ws</code> and tunnels the connection to an echo backend.</p>
+        <div class="out" id="ws"></div><div class="sum" id="ws-sum"></div>
+      </div>
     </div>
 
-    <div class="card">
-      <header><h2>Canary split</h2><button data-run="canary">Send 20 requests</button></header>
-      <p><code>GET /canary</code> is weighted 90/10 between backend <b>a</b> and backend <b>b</b>.</p>
-      <div class="out" id="canary"></div><div class="sum" id="canary-sum"></div>
-    </div>
+    <aside class="dash" aria-labelledby="dash-title">
+      <div class="dash-head">
+        <h2 id="dash-title">Live dashboard</h2>
+        <span class="live"><span class="dot" id="dot"></span><span id="updated">connecting</span></span>
+      </div>
+      <p class="dash-sub">
+        From Ferry's <code>/metrics</code> every 2 s: everyone's traffic since
+        the container last woke up.
+      </p>
 
-    <div class="card">
-      <header><h2>Header match</h2><button data-run="header">Send 5 requests</button></header>
-      <p>The same path with <code>x-canary: always</code> matches a more specific rule that always picks <b>b</b>.</p>
-      <div class="out" id="header"></div><div class="sum" id="header-sum"></div>
-    </div>
+      <div class="tiles">
+        <div class="tile"><div class="k">Requests per second</div><div class="v" id="t-rps">–</div></div>
+        <div class="tile"><div class="k">Requests in total</div><div class="v" id="t-total">–</div></div>
+        <div class="tile"><div class="k">Retries by Ferry</div><div class="v" id="t-retries">–</div></div>
+        <div class="tile"><div class="k">Ferry overhead, p99</div><div class="v" id="t-p99">–</div></div>
+      </div>
 
-    <div class="card">
-      <header><h2>Retries</h2><button data-run="retry">Send 20 requests</button></header>
-      <p><code>GET /retry</code> hits a backend that fails half the time. Ferry retries 503s up to twice, so about 7 in 8 requests still succeed.</p>
-      <div class="out" id="retry"></div><div class="sum" id="retry-sum"></div>
-    </div>
+      <h3>Requests per second, last 2 minutes</h3>
+      <div class="chart" id="chart">
+        <svg id="spark" viewBox="0 0 340 120" preserveAspectRatio="none" role="img" aria-label="Requests per second over the last two minutes"></svg>
+        <div class="tip" id="tip"></div>
+      </div>
 
-    <div class="card">
-      <header><h2>No route</h2><button data-run="nope">Send 1 request</button></header>
-      <p><code>GET /nope</code> matches no route, so Ferry answers 404 itself.</p>
-      <div class="out" id="nope"></div><div class="sum" id="nope-sum"></div>
-    </div>
+      <h3>Responses by backend</h3>
+      <div class="bars" id="bars"></div>
+      <div class="legend">
+        <span><i style="background: var(--a)"></i>a</span>
+        <span><i style="background: var(--b)"></i>b</span>
+        <span><i style="background: var(--faint)"></i>flaky, 2xx</span>
+        <span><i style="background: var(--bad)"></i>flaky, 503</span>
+      </div>
 
-    <div class="card">
-      <header><h2>WebSocket</h2><button data-run="ws">Open and send 3</button></header>
-      <p>Ferry upgrades <code>/ws</code> and tunnels the connection to an echo backend.</p>
-      <div class="out" id="ws"></div><div class="sum" id="ws-sum"></div>
-    </div>
+      <h3>Answered by Ferry itself</h3>
+      <div class="replies">
+        <span>404, no route</span><span id="r-404">–</span>
+        <span>429, rate limited</span><span id="r-429">–</span>
+        <span>Open connections</span><span id="r-conn">–</span>
+      </div>
+      <div class="err" id="dash-err" hidden></div>
+    </aside>
   </div>
 
   <section>
@@ -138,6 +224,7 @@
         <tr><td>Config</td><td>A fixed YAML file</td><td>The Gateway API and <code>FerryPolicy</code>, streamed to proxies over mTLS</td></tr>
         <tr><td>Backends</td><td>Mock echo servers in the same container</td><td>Your Services, discovered from EndpointSlices</td></tr>
         <tr><td>TLS</td><td>Terminated by Render</td><td>Terminated by Ferry: SNI, hot rotation, mTLS to backends</td></tr>
+        <tr><td>Dashboard</td><td>This panel, reading <code>/metrics</code> from the browser</td><td>Prometheus, a Grafana dashboard, alerts with runbooks, OpenTelemetry traces</td></tr>
         <tr><td>Availability</td><td>Sleeps after 15 idle minutes</td><td>Multiple replicas, zero-drop restarts, SLOs with alerts</td></tr>
       </tbody>
     </table>
@@ -146,12 +233,15 @@
   <footer>
     <a href="https://github.com/ashmit27j/ferry">Source on GitHub</a> ·
     <a href="https://github.com/ashmit27j/ferry/blob/main/docs/free-version.md">How this demo works</a> ·
-    <a href="https://github.com/ashmit27j/ferry/blob/main/deploy/render/ferry.yaml">Its Ferry config</a>
+    <a href="https://github.com/ashmit27j/ferry/blob/main/deploy/render/ferry.yaml">Its Ferry config</a> ·
+    <a href="/stats">Raw metrics</a>
   </footer>
 </main>
 
 <script>
   const $ = (id) => document.getElementById(id);
+
+  // ---- Demos ---------------------------------------------------------------
 
   function chip(out, text, cls) {
     const el = document.createElement("span");
@@ -250,8 +340,201 @@
       btn.disabled = true;
       await demos[id](out, sum);
       btn.disabled = false;
+      poll();
     });
   });
+
+  // ---- Live dashboard --------------------------------------------------------
+
+  const POLL_MS = 2000;
+  const WINDOW = 60; // samples: two minutes
+  const IGNORED_ROUTES = new Set(["stats", "health"]);
+  let history = []; // { t, total, buckets }
+  let timer = null;
+
+  // Prometheus text format: name{a="x",b="y"} value
+  function parse(text) {
+    const out = [];
+    for (const line of text.split("\n")) {
+      if (!line || line[0] === "#") continue;
+      const m = line.match(/^([a-zA-Z_:][\w:]*)(?:\{(.*)\})?\s+(\S+)/);
+      if (!m) continue;
+      const labels = {};
+      if (m[2]) for (const p of m[2].matchAll(/(\w+)="((?:[^"\\]|\\.)*)"/g)) labels[p[1]] = p[2];
+      out.push({ name: m[1], labels, value: Number(m[3]) });
+    }
+    return out;
+  }
+
+  const sum = (rows, name, pred) =>
+    rows.filter((r) => r.name === name && (!pred || pred(r.labels))).reduce((s, r) => s + r.value, 0);
+
+  function overheadBuckets(rows) {
+    const b = {};
+    for (const r of rows) {
+      if (r.name !== "ferry_request_overhead_seconds_bucket") continue;
+      const le = r.labels.le === "inf" || r.labels.le === "+Inf" ? Infinity : Number(r.labels.le);
+      b[le] = (b[le] || 0) + r.value;
+    }
+    return Object.entries(b).map(([le, n]) => [Number(le), n]).sort((x, y) => x[0] - y[0]);
+  }
+
+  // Quantile from cumulative bucket deltas, interpolated within the bucket.
+  function quantile(now, then, q) {
+    const d = now.map(([le, n], i) => [le, n - ((then && then[i]) ? then[i][1] : 0)]);
+    const total = d.length ? d[d.length - 1][1] : 0;
+    if (total <= 0) return null;
+    const rank = q * total;
+    let prevLe = 0, prevN = 0;
+    for (const [le, n] of d) {
+      if (n >= rank) {
+        if (!isFinite(le)) return prevLe;
+        return prevLe + (le - prevLe) * ((rank - prevN) / Math.max(n - prevN, 1));
+      }
+      prevLe = le; prevN = n;
+    }
+    return prevLe;
+  }
+
+  const fmtInt = (n) => Math.round(n).toLocaleString();
+  function fmtSecs(s) {
+    if (s == null) return "–";
+    if (s < 1e-3) return `${Math.round(s * 1e6)}<span class="u">µs</span>`;
+    return `${(s * 1e3).toFixed(s < 0.01 ? 2 : 1)}<span class="u">ms</span>`;
+  }
+  const fmtRate = (r) => (r < 10 ? r.toFixed(1) : Math.round(r).toString());
+
+  function renderBars(rows) {
+    const resp = (cluster, cls) =>
+      sum(rows, "ferry_upstream_responses_total", (l) => l.cluster === cluster && (!cls || l.code_class === cls));
+    // "both" is the round-robin cluster over a and b, which alternates
+    // exactly, so half of its answers came from each.
+    const a = resp("a") + resp("both") / 2;
+    const b = resp("b") + resp("both") / 2;
+    const flakyOk = resp("flaky", "2xx");
+    const flakyBad = resp("flaky", "5xx");
+    const max = Math.max(a, b, flakyOk + flakyBad, 1);
+    const pct = (n) => `${(n / max) * 100}%`;
+    $("bars").innerHTML = `
+      <div class="bar-row"><span class="name">a</span>
+        <div class="track"><div class="seg" style="width:${pct(a)};background:var(--a)"></div></div>
+        <span class="n">${fmtInt(a)}</span></div>
+      <div class="bar-row"><span class="name">b</span>
+        <div class="track"><div class="seg" style="width:${pct(b)};background:var(--b)"></div></div>
+        <span class="n">${fmtInt(b)}</span></div>
+      <div class="bar-row"><span class="name">flaky</span>
+        <div class="track">
+          <div class="seg first" style="width:${pct(flakyOk)};background:var(--faint)" title="${fmtInt(flakyOk)} succeeded"></div>
+          <div class="seg" style="width:${pct(flakyBad)};background:var(--bad)" title="${fmtInt(flakyBad)} failed with 503"></div>
+        </div>
+        <span class="n">${fmtInt(flakyOk)} / ${fmtInt(flakyBad)}</span></div>`;
+  }
+
+  function rates() {
+    const pts = [];
+    for (let i = 1; i < history.length; i++) {
+      const dt = (history[i].t - history[i - 1].t) / 1000;
+      pts.push({ t: history[i].t, v: dt > 0 ? Math.max(0, history[i].total - history[i - 1].total) / dt : 0 });
+    }
+    return pts;
+  }
+
+  function renderChart() {
+    const svg = $("spark");
+    const pts = rates();
+    const W = 340, H = 120, top = 8, bottom = 18;
+    const max = Math.max(1, ...pts.map((p) => p.v));
+    const nice = max <= 1 ? 1 : max <= 2 ? 2 : max <= 5 ? 5 : Math.ceil(max / 10) * 10;
+    const x = (i) => (WINDOW <= 2 ? 0 : (W * (WINDOW - 1 - (pts.length - 1 - i))) / (WINDOW - 2));
+    const y = (v) => top + (H - top - bottom) * (1 - v / nice);
+    let grid = "";
+    for (const g of [0, nice / 2, nice]) {
+      grid += `<line x1="0" x2="${W}" y1="${y(g)}" y2="${y(g)}" stroke="var(--grid)" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+      grid += `<text x="0" y="${y(g) - 3}" font-size="9" fill="var(--faint)">${g}</text>`;
+    }
+    grid += `<text x="0" y="${H - 2}" font-size="9" fill="var(--faint)">2 min ago</text>`;
+    grid += `<text x="${W}" y="${H - 2}" font-size="9" fill="var(--faint)" text-anchor="end">now</text>`;
+    let line = "", area = "";
+    if (pts.length > 1) {
+      const d = pts.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.v).toFixed(1)}`).join("");
+      line = `<path d="${d}" fill="none" stroke="var(--accent)" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>`;
+      area = `<path d="${d}L${x(pts.length - 1).toFixed(1)},${y(0)}L${x(0).toFixed(1)},${y(0)}Z" fill="var(--accent)" opacity="0.12"/>`;
+    }
+    svg.innerHTML = grid + area + line + `<line id="cross" y1="${top}" y2="${y(0)}" stroke="var(--faint)" stroke-width="1" vector-effect="non-scaling-stroke" visibility="hidden"/>`;
+    svg._pts = pts; svg._x = x; svg._y = y;
+  }
+
+  $("chart").addEventListener("mousemove", (e) => {
+    const svg = $("spark"), pts = svg._pts || [];
+    if (!pts.length) return;
+    const box = svg.getBoundingClientRect();
+    const sx = ((e.clientX - box.left) / box.width) * 340;
+    let best = 0;
+    pts.forEach((p, i) => { if (Math.abs(svg._x(i) - sx) < Math.abs(svg._x(best) - sx)) best = i; });
+    const p = pts[best];
+    const cross = svg.querySelector("#cross");
+    cross.setAttribute("x1", svg._x(best)); cross.setAttribute("x2", svg._x(best));
+    cross.setAttribute("visibility", "visible");
+    const tip = $("tip");
+    tip.style.display = "block";
+    const frac = svg._x(best) / 340;
+    tip.style.left = `${frac * box.width}px`;
+    // Keep the tooltip inside the panel near either edge.
+    tip.style.transform = `translate(${frac > 0.7 ? "-100%" : frac < 0.3 ? "0" : "-50%"}, -110%)`;
+    tip.style.top = `${(svg._y(p.v) / 120) * box.height}px`;
+    tip.textContent = `${new Date(p.t).toLocaleTimeString()} · ${fmtRate(p.v)} req/s`;
+  });
+  $("chart").addEventListener("mouseleave", () => {
+    $("tip").style.display = "none";
+    const cross = $("spark").querySelector("#cross");
+    if (cross) cross.setAttribute("visibility", "hidden");
+  });
+
+  async function poll() {
+    clearTimeout(timer);
+    try {
+      const r = await fetch("/stats", { cache: "no-store" });
+      if (!r.ok) throw new Error(r.status === 429 ? "rate limited, retrying" : `HTTP ${r.status}`);
+      const rows = parse(await r.text());
+      const total = sum(rows, "ferry_requests_total", (l) => !IGNORED_ROUTES.has(l.route));
+      const sample = { t: Date.now(), total, buckets: overheadBuckets(rows) };
+      // A restarted container resets every counter.
+      if (history.length && total < history[history.length - 1].total) history = [];
+      // A refresh right after a demo finishes updates the numbers but adds
+      // no chart point: a few requests over a few milliseconds is no rate.
+      const last = history[history.length - 1];
+      if (!last || sample.t - last.t >= POLL_MS * 0.75) {
+        history.push(sample);
+        if (history.length > WINDOW) history.shift();
+      }
+
+      const pts = rates();
+      const recent = pts.slice(-3);
+      const rps = recent.length ? recent.reduce((s, p) => s + p.v, 0) / recent.length : 0;
+      $("t-rps").textContent = fmtRate(rps);
+      $("t-total").textContent = fmtInt(total);
+      $("t-retries").textContent = fmtInt(sum(rows, "ferry_upstream_retries_total"));
+      const windowP99 = quantile(sample.buckets, history.length > 1 ? history[0].buckets : null, 0.99);
+      $("t-p99").innerHTML = fmtSecs(windowP99 ?? quantile(sample.buckets, null, 0.99));
+      $("r-404").textContent = fmtInt(sum(rows, "ferry_local_replies_total", (l) => l.reason === "no_route"));
+      $("r-429").textContent = fmtInt(sum(rows, "ferry_local_replies_total", (l) => l.reason === "rate_limited"));
+      $("r-conn").textContent = fmtInt(sum(rows, "ferry_downstream_active_connections"));
+      renderBars(rows);
+      renderChart();
+      $("dot").classList.add("on");
+      $("updated").textContent = "live";
+      $("dash-err").hidden = true;
+    } catch (e) {
+      $("dot").classList.remove("on");
+      $("updated").textContent = "paused";
+      $("dash-err").hidden = false;
+      $("dash-err").textContent = `Could not read /stats: ${e.message}`;
+    }
+    if (!document.hidden) timer = setTimeout(poll, POLL_MS);
+  }
+
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
+  poll();
 </script>
 </body>
 </html>
