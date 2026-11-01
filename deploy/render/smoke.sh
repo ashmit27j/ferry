@@ -6,6 +6,8 @@
 #
 #   deploy/render/smoke.sh [https://ferry-free.onrender.com]
 set -euo pipefail
+# Checks read whole responses (grep -c, not grep -q): grep -q exits at the
+# first match, curl then dies of SIGPIPE, and pipefail reports a failure.
 
 URL=${1:-https://ferry-free.onrender.com}
 fail=0
@@ -19,9 +21,9 @@ curl -s -m 120 -o /dev/null "$URL/healthz" || true # wake it up
 
 check "/healthz is 200" "$([ "$(status "$URL/healthz")" = 200 ] && echo 1)"
 check "/ serves the landing page" \
-    "$(curl -s -m 20 "$URL/" | grep -q '<title>Ferry Live Demo</title>' && echo 1)"
+    "$(curl -s -m 20 "$URL/" | grep -c '<title>Ferry Live Demo</title>' > /dev/null && echo 1)"
 check "x-ferry-edition: free" \
-    "$(curl -s -m 20 -o /dev/null -D - "$URL/hello" | grep -qi '^x-ferry-edition: free' && echo 1)"
+    "$(curl -s -m 20 -o /dev/null -D - "$URL/hello" | grep -ci '^x-ferry-edition: free' > /dev/null && echo 1)"
 
 rr=$(for _ in 1 2 3 4; do backend "$URL/hello"; done | tr -d '\n')
 check "/hello alternates a and b ($rr)" "$([[ $rr == abab || $rr == baba ]] && echo 1)"
@@ -35,7 +37,7 @@ bad=$(for _ in $(seq 80); do status "$URL/retry"; echo; done | grep -c '^503$' |
 check "/retry retries 503s ($bad of 80 failed)" "$([ "$bad" -le 24 ] && echo 1)"
 
 check "unknown path is 404" "$([ "$(status "$URL/nope")" = 404 ] && echo 1)"
-check "/stats serves Ferry's metrics" "$(curl -s -m 20 "$URL/stats" | grep -q '^ferry_requests_total{' && echo 1)"
+check "/stats serves Ferry's metrics" "$(curl -s -m 20 "$URL/stats" | grep -c '^ferry_requests_total{' > /dev/null && echo 1)"
 for p in /metrics /config /clusters; do
     check "admin $p is not public" "$([ "$(status "$URL$p")" = 404 ] && echo 1)"
 done
