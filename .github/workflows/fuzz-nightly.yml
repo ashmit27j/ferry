@@ -1,8 +1,9 @@
 name: fuzz-nightly
 
+# Manual only: the nightly schedule was dropped (2026-11-06) to stop the
+# ~2,700 runner-minutes a month it used. Run it from the Actions tab, or
+# locally with `FUZZ_SECONDS=600 bench/exit/m5/fuzz.sh`.
 on:
-  schedule:
-    - cron: "0 20 * * *" # 01:30 IST
   workflow_dispatch:
 
 permissions:

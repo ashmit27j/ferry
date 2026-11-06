@@ -54,8 +54,9 @@ curl localhost:9901/metrics                   # admin API: /live /ready /metrics
 ```
 
 All of fmt, clippy, nextest, deny and audit must pass before every commit. CI
-(`.github/workflows/ci.yml`) runs exactly these, plus coverage. The nightly
-workflow fuzzes each target for 10 minutes. `release.yml` runs release-please
+(`.github/workflows/ci.yml`) runs exactly these, plus coverage. `fuzz-nightly.yml`
+fuzzes each target for 10 minutes, on manual dispatch only (the schedule was
+dropped 2026-11-06 to save Actions minutes). `release.yml` runs release-please
 on main; merging its release PR publishes a multi-arch image and the Helm
 chart to GHCR, Cosign-signed (keyless), with an SPDX SBOM and provenance.
 Every action is pinned by commit SHA (version in a comment); keep it so.
@@ -219,7 +220,7 @@ reload: plan listener slots (keep / rename / bind new / retire) ▶ prepare ▶ 
   has unit tests. Every bug fix comes with a regression test.
 - Use proptest for balancers, matching, retry budgets and config validation.
 - Every parser of untrusted input (requests, headers, configs, snapshots,
-  manifests) gets a fuzz target in `fuzz/` with seeds, and joins the nightly
+  manifests) gets a fuzz target in `fuzz/` with seeds, and joins the fuzz
   matrix. Values Ferry prints must parse back (fuzz targets check this).
 - Conventional commits (`feat(lb): ...`, `fix(proxy): ...`, `docs(adr): ...`),
   small and focused.
